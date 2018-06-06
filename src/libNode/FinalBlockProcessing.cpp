@@ -430,7 +430,8 @@ bool Node::FindTxnInReceivedTxnsList(const TxBlock& finalblock,
 void Node::CommitMyShardsMicroBlock(const TxBlock& finalblock,
                                     const uint256_t& blocknum,
                                     uint8_t sharing_mode,
-                                    vector<Transaction>& txns_to_send)
+                                    vector<Transaction>& txns_to_send,
+                                    vector<unsigned char>& B)
 {
     LOG_MARKER();
 
@@ -459,6 +460,17 @@ void Node::CommitMyShardsMicroBlock(const TxBlock& finalblock,
               "Number of transactions to broadcast for block "
                   << blocknum << " = " << txns_to_send.size());
 
+    const vector<bool>& b1 = m_microblock->GetB1();
+    const vector<bool>& b2 = m_microblock->GetB2();
+
+    unsigned int currOffset = 0;
+
+    currOffset += BitVector::SetBitVector(B, currOffset, b1);
+    currOffset += BitVector::SetBitVector(B, currOffset, b2);
+
+    LOG_EPOCH(INFO, to_string(m_mediator.m_currentEpochNum).c_str(),
+              "Bit Vector Encoded");
+
     {
         lock_guard<mutex> g(m_mutexReceivedTransactions);
         m_receivedTransactions.erase(blocknum);
@@ -471,9 +483,29 @@ void Node::CommitMyShardsMicroBlock(const TxBlock& finalblock,
 
 void Node::BroadcastTransactionsToSendingAssignment(
     const uint256_t& blocknum, const vector<Peer>& sendingAssignment,
-    const TxnHash& microBlockTxHash, vector<Transaction>& txns_to_send) const
+    const TxnHash& microBlockTxHash, vector<Transaction>& txns_to_send,
+    const vector<unsigned char>& B) const
 {
     LOG_MARKER();
+
+    vector<unsigned char> forwardbitmap_message
+        = {MessageType : NODE, NodeInstructionType::FORWARDBITMAP};
+    unsigned int currOffset = MessageOffset::BODY;
+
+    Serializable::SetNumber<uint256_t>(forwardbitmap_message, currOffset,
+                                       blocknum, UINT256_SIZE);
+    currOffset += UINT256_SIZE;
+    Serializable::SetNumber<uint32_t>(forwardbitmap_message, currOffset,
+                                      m_myShardID, sizeof(uint32_t));
+    currOffset += sizeof(uint32_t);
+
+    copy(B.begin(), B.end(), forwardbitmap_message.begin() + currOffset);
+
+    P2PComm::GetInstance().SendBroadcastMessage(sendingAssignment,
+                                                forwardbitmap_message);
+
+    LOG_EPOCH(INFO, to_string(m_mediator.m_currentEpochNum).c_str(),
+              "SEND BITMAP");
 
     if (txns_to_send.size() > 0)
     {
@@ -639,15 +671,16 @@ bool Node::ActOnFinalBlock(uint8_t tx_sharing_mode, const vector<Peer>& nodes)
                                                    isEveryMicroBlockAvailable))
     {
         vector<Transaction> txns_to_send;
+        vector<unsigned char> B;
 
         CommitMyShardsMicroBlock(finalblock, blocknum, tx_sharing_mode,
-                                 txns_to_send);
+                                 txns_to_send, B);
 
         if (sendingAssignment.size() > 0)
         {
             BroadcastTransactionsToSendingAssignment(
                 blocknum, sendingAssignment,
-                m_microblock->GetHeader().GetTxRootHash(), txns_to_send);
+                m_microblock->GetHeader().GetTxRootHash(), txns_to_send, B);
         }
 
         if (isEveryMicroBlockAvailable)
@@ -688,15 +721,16 @@ bool Node::ActOnFinalBlock(uint8_t tx_sharing_mode,
                 blocknum, isEveryMicroBlockAvailable))
         {
             vector<Transaction> txns_to_send;
+            vector<unsigned char> B;
 
             CommitMyShardsMicroBlock(finalblock, blocknum, tx_sharing_mode,
-                                     txns_to_send);
+                                     txns_to_send, B);
 
             if (sendingAssignment.size() > 0)
             {
                 BroadcastTransactionsToSendingAssignment(
                     blocknum, sendingAssignment,
-                    m_microblock->GetHeader().GetTxRootHash(), txns_to_send);
+                    m_microblock->GetHeader().GetTxRootHash(), txns_to_send, B);
             }
 
             if (isEveryMicroBlockAvailable)
@@ -1571,6 +1605,52 @@ bool Node::ProcessForwardTransaction(const vector<unsigned char>& message,
         P2PComm::GetInstance().SendBroadcastMessage(forward_list, message);
         LOG_EPOCH(INFO, to_string(m_mediator.m_currentEpochNum).c_str(),
                   "DEBUG I have broadcasted the txn body!")
+    }
+#endif // IS_LOOKUP_NODE
+    return true;
+}
+
+bool Node::ProcessForwardBitmap(const vector<unsigned char>& message,
+                                unsigned int cur_offset, const Peer& from)
+{
+    //[blocknumber][shard_id][B1][B2]
+
+    LOG_MARKER();
+
+    uint256_t blocknum
+        = Serializable::GetNumber<uint256_t>(message, cur_offset, UINT256_SIZE);
+    cur_offset += UINT256_SIZE;
+
+    uint32_t shardId = Serializable::GetNumber<uint32_t>(message, cur_offset,
+                                                         sizeof(uint32_t));
+
+    shardId = shardId;
+    cur_offset += sizeof(uint32_t);
+
+    unsigned len1 = BitVector::GetBitVectorSerializedSize(
+        (message.at(cur_offset) << 8) + message.at(cur_offset + 1));
+    vector<bool> b1 = BitVector::GetBitVector(message, cur_offset);
+    cur_offset += len1;
+
+    unsigned len2 = BitVector::GetBitVectorSerializedSize(
+        (message.at(cur_offset) << 8) + message.at(cur_offset + 1));
+    vector<bool> b2 = BitVector::GetBitVector(message, cur_offset);
+    cur_offset += len2;
+
+    //Check with Tx Block
+
+    //Update Accounts
+
+#ifndef IS_LOOKUP_NODE
+
+    vector<Peer> forward_list;
+    LoadFwdingAssgnForThisBlockNum(blocknum, forward_list);
+
+    if (forward_list.size() > 0)
+    {
+        P2PComm::GetInstance().SendBroadcastMessage(forward_list, message);
+        LOG_EPOCH(INFO, to_string(m_mediator.m_currentEpochNum).c_str(),
+                  "Broadcasted Bitmap")
     }
 #endif // IS_LOOKUP_NODE
 

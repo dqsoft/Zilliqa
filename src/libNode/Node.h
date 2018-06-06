@@ -198,15 +198,15 @@ class Node : public Executable, public Broadcastable
         const TxBlock& finalblock,
         const boost::multiprecision::uint256_t& blocknum, uint8_t sharing_mode,
         vector<Transaction>& txns_to_send, const TxnHash& tx_hash);
-    void
-    CommitMyShardsMicroBlock(const TxBlock& finalblock,
-                             const boost::multiprecision::uint256_t& blocknum,
-                             uint8_t sharing_mode,
-                             vector<Transaction>& txns_to_send);
+    void CommitMyShardsMicroBlock(
+        const TxBlock& finalblock,
+        const boost::multiprecision::uint256_t& blocknum, uint8_t sharing_mode,
+        vector<Transaction>& txns_to_send, vector<unsigned char>& B);
     void BroadcastTransactionsToSendingAssignment(
         const boost::multiprecision::uint256_t& blocknum,
         const vector<Peer>& sendingAssignment, const TxnHash& microBlockTxHash,
-        vector<Transaction>& txns_to_send) const;
+        vector<Transaction>& txns_to_send,
+        const vector<unsigned char>& B) const;
     void LoadUnavailableMicroBlockTxRootHashes(
         const TxBlock& finalblock,
         const boost::multiprecision::uint256_t& blocknum);
@@ -275,6 +275,8 @@ class Node : public Executable, public Broadcastable
                            unsigned int offset, const Peer& from);
     bool ProcessForwardTransaction(const std::vector<unsigned char>& message,
                                    unsigned int offset, const Peer& from);
+    bool ProcessForwardBitmap(const std::vector<unsigned char>& message,
+                              unsigned int offset, const Peer& from);
     bool ProcessCreateTransactionFromLookup(
         const std::vector<unsigned char>& message, unsigned int offset,
         const Peer& from);

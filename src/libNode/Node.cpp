@@ -1341,7 +1341,8 @@ bool Node::Execute(const vector<unsigned char>& message, unsigned int offset,
            &Node::ProcessMicroblockConsensus,
            &Node::ProcessFinalBlock,
            &Node::ProcessForwardTransaction,
-           &Node::ProcessCreateTransactionFromLookup};
+           &Node::ProcessCreateTransactionFromLookup,
+           &Node::ProcessForwardBitmap};
 
     const unsigned char ins_byte = message.at(offset);
     const unsigned int ins_handlers_count
