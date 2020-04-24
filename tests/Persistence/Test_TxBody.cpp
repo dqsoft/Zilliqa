@@ -1,29 +1,31 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#include "common/Constants.h"
-#include "libCrypto/Schnorr.h"
-#include "libData/AccountData/Address.h"
-#include "libData/AccountData/Transaction.h"
-#include "libPersistence/BlockStorage.h"
-#include "libPersistence/DB.h"
-#include "libUtils/TimeUtils.h"
+#include <Schnorr.h>
 #include <array>
 #include <string>
 #include <vector>
+#include "common/Constants.h"
+#include "libData/AccountData/Address.h"
+#include "libData/AccountData/Transaction.h"
+#include "libData/AccountData/TransactionReceipt.h"
+#include "libPersistence/BlockStorage.h"
+#include "libPersistence/DB.h"
+#include "libUtils/TimeUtils.h"
 
 #include <boost/filesystem.hpp>
 
@@ -35,140 +37,69 @@ using namespace std;
 
 BOOST_AUTO_TEST_SUITE(persistencetest)
 
-BOOST_AUTO_TEST_CASE(testReadWriteSimpleStringToDB)
-{
-    INIT_STDOUT_LOGGER();
+BOOST_AUTO_TEST_CASE(testReadWriteSimpleStringToDB) {
+  INIT_STDOUT_LOGGER();
 
-    LOG_MARKER();
+  LOG_MARKER();
 
-    DB db("test.db");
+  DB db("test.db");
 
-    db.WriteToDB("fruit", "vegetable");
+  db.WriteToDB("fruit", "vegetable");
 
-    string ret = db.ReadFromDB("fruit");
+  string ret = db.ReadFromDB("fruit");
 
-    BOOST_CHECK_MESSAGE(
-        ret == "vegetable",
-        "ERROR: return value from DB not equal to inserted value");
+  BOOST_CHECK_MESSAGE(
+      ret == "vegetable",
+      "ERROR: return value from DB not equal to inserted value");
 }
 
-Transaction constructDummyTxBody(int instanceNum)
-{
-    Address addr;
-    return Transaction(0, instanceNum, addr,
-                       Schnorr::GetInstance().GenKeyPair(), 0, 1, 2, {0x33},
-                       {0x44});
+TransactionWithReceipt constructDummyTxBody(int instanceNum) {
+  Address toAddr;
+
+  for (unsigned int i = 0; i < toAddr.asArray().size(); i++) {
+    toAddr.asArray().at(i) = i + 8;
+  }
+
+  // return Transaction(0, instanceNum, addr,
+  //                    Schnorr::GenKeyPair(), 0, 1, 2, {}, {});
+  return TransactionWithReceipt(
+      Transaction(0, instanceNum, toAddr, Schnorr::GenKeyPair(), 0, 1, 2, {},
+                  {}),
+      TransactionReceipt());
 }
 
-BOOST_AUTO_TEST_CASE(testSerializationDeserialization)
-{
-    INIT_STDOUT_LOGGER();
+BOOST_AUTO_TEST_CASE(testSerializationDeserialization) {
+  INIT_STDOUT_LOGGER();
 
-    LOG_MARKER();
+  LOG_MARKER();
 
-    // checking if normal serialization and deserialization of blocks is working or not
+  // checking if normal serialization and deserialization of blocks is working
+  // or not
 
-    Transaction body1 = constructDummyTxBody(0);
+  TransactionWithReceipt body1 = constructDummyTxBody(0);
 
-    std::vector<unsigned char> serializedTxBody;
+  bytes serializedTxBody;
+  body1.Serialize(serializedTxBody, 0);
+
+  TransactionWithReceipt body2(serializedTxBody, 0);
+
+  BOOST_CHECK_MESSAGE(
+      body1.GetTransaction().GetTranID() == body2.GetTransaction().GetTranID(),
+      "Error: Transaction id shouldn't change after "
+      "serailization and deserialization");
+}
+
+BOOST_AUTO_TEST_CASE(testBlockStorage) {
+  INIT_STDOUT_LOGGER();
+
+  LOG_MARKER();
+  if (LOOKUP_NODE_MODE) {
+    TransactionWithReceipt body1 = constructDummyTxBody(0);
+
+    auto tx_hash = body1.GetTransaction().GetTranID();
+
+    bytes serializedTxBody;
     body1.Serialize(serializedTxBody, 0);
-
-    Transaction body2(serializedTxBody, 0);
-
-    BOOST_CHECK_MESSAGE(body1.GetTranID() == body2.GetTranID(),
-                        "Error: Transaction id shouldn't change after "
-                        "serailization and deserialization");
-}
-
-#ifndef IS_LOOKUP_NODE
-boost::filesystem::path p_txbodyDB(PERSISTENCE_PATH + "/" + TX_BODY_SUBDIR);
-
-BOOST_AUTO_TEST_CASE(testTxBodyDBPush)
-{
-    INIT_STDOUT_LOGGER();
-
-    LOG_MARKER();
-
-    for (unsigned int i = 0; i < NUM_DS_KEEP_TX_BODY + 1; i++)
-    {
-        BlockStorage::GetBlockStorage().PushBackTxBodyDB(i);
-    }
-
-    BOOST_CHECK_MESSAGE(BlockStorage::GetBlockStorage().GetTxBodyDBSize()
-                            == NUM_DS_KEEP_TX_BODY + 1,
-                        "Error: Number of created DB in memory doesn't meet "
-                        "expectation");
-
-    BOOST_CHECK_MESSAGE(boost::filesystem::exists(p_txbodyDB),
-                        "Error: TX_BODY subdirectory is not created");
-
-    unsigned int countDB = 0;
-    for (auto& entry : boost::make_iterator_range(
-             boost::filesystem::directory_iterator(p_txbodyDB), {}))
-    {
-        (void)entry;
-        countDB++;
-    }
-
-    BOOST_CHECK_MESSAGE(
-        countDB == NUM_DS_KEEP_TX_BODY + 1,
-        "Error: Didn't get the database directories as we want");
-
-    BOOST_CHECK_MESSAGE(
-        !BlockStorage::GetBlockStorage().PushBackTxBodyDB(
-            BlockStorage::GetBlockStorage().GetTxBodyDBSize()),
-        "Error: Still adding db after the txBodyDB list is full");
-}
-
-BOOST_AUTO_TEST_CASE(testTxBodyDBPop)
-{
-    INIT_STDOUT_LOGGER();
-
-    LOG_MARKER();
-
-    BOOST_CHECK_MESSAGE(BlockStorage::GetBlockStorage().PopFrontTxBodyDB(),
-                        "Error: PopFrontTxBodyDB failed, while it shouldn't");
-    BOOST_CHECK_MESSAGE(BlockStorage::GetBlockStorage().GetTxBodyDBSize()
-                            == NUM_DS_KEEP_TX_BODY,
-                        "Error: Failed to pop the db in memory");
-
-    BlockStorage::GetBlockStorage().PopFrontTxBodyDB();
-
-    BOOST_CHECK_MESSAGE(BlockStorage::GetBlockStorage().GetTxBodyDBSize()
-                            == NUM_DS_KEEP_TX_BODY,
-                        "Error: Popped the front db, while it shouldn't");
-    unsigned int countDB = 0;
-    for (auto& entry : boost::make_iterator_range(
-             boost::filesystem::directory_iterator(p_txbodyDB), {}))
-    {
-        (void)entry;
-        countDB++;
-    }
-    BOOST_CHECK_MESSAGE(countDB == NUM_DS_KEEP_TX_BODY,
-                        "Error: the number of db after popping doesn't meet"
-                        "expectation");
-    boost::filesystem::remove_all(p_txbodyDB);
-
-    BOOST_CHECK_MESSAGE(!boost::filesystem::exists(p_txbodyDB),
-                        "Error: TX_BODY subdirectory is not deleted");
-}
-#endif // IS_LOOKUP_NODE
-
-BOOST_AUTO_TEST_CASE(testBlockStorage)
-{
-    INIT_STDOUT_LOGGER();
-
-    LOG_MARKER();
-
-    Transaction body1 = constructDummyTxBody(0);
-
-    auto tx_hash = body1.GetTranID();
-
-    vector<unsigned char> serializedTxBody;
-    body1.Serialize(serializedTxBody, 0);
-#ifndef IS_LOOKUP_NODE
-    BlockStorage::GetBlockStorage().PushBackTxBodyDB(0);
-#endif // IS_LOOKUP_NODE
     BlockStorage::GetBlockStorage().PutTxBody(tx_hash, serializedTxBody);
 
     TxBodySharedPtr body2;
@@ -176,25 +107,92 @@ BOOST_AUTO_TEST_CASE(testBlockStorage)
 
     // BOOST_CHECK_MESSAGE(body1 == *body2,
     //     "block shouldn't change after writing to/ reading from disk");
+  }
 }
 
-BOOST_AUTO_TEST_CASE(testRandomBlockAccesses)
-{
-    INIT_STDOUT_LOGGER();
+BOOST_AUTO_TEST_CASE(testTRDeserializationFromFile) {
+  INIT_STDOUT_LOGGER();
 
-    LOG_MARKER();
+  LOG_MARKER();
 
-    Transaction body1 = constructDummyTxBody(1);
-    Transaction body2 = constructDummyTxBody(2);
-    Transaction body3 = constructDummyTxBody(3);
-    Transaction body4 = constructDummyTxBody(4);
+  // checking if serialization and deserialization of TransactionWithReceipt
+  // to/from file is working or not
 
-    auto tx_hash1 = body1.GetTranID();
-    auto tx_hash2 = body2.GetTranID();
-    auto tx_hash3 = body3.GetTranID();
-    auto tx_hash4 = body4.GetTranID();
+  std::unordered_map<TxnHash, TransactionWithReceipt> txns;
+  TransactionWithReceipt tx_body = constructDummyTxBody(0);
+  auto tx_hash = tx_body.GetTransaction().GetTranID();
 
-    std::vector<unsigned char> serializedTxBody;
+  ostringstream oss;
+  oss << "/tmp/txns.1";
+  string txns_filename = oss.str();
+  ofstream ofile(txns_filename, std::fstream::binary);
+
+  bytes serializedTxn;
+  tx_body.Serialize(serializedTxn, 0);
+
+  // write HASH LEN and HASH
+  size_t size = tx_hash.size;
+  ofile.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
+  ofile.write(reinterpret_cast<const char*>(tx_hash.data()), size);
+
+  // write TXN LEN AND TXN
+  size = serializedTxn.size();
+  ofile.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
+  ofile.write(reinterpret_cast<const char*>(serializedTxn.data()), size);
+  ofile.close();
+
+  // Now read back file to see if the TransactionWithReceipt is good
+  ifstream infile(txns_filename, ios::in | ios::binary);
+  TxnHash r_txn_hash;
+  bytes buff;
+
+  // get the txnHash length and raw bytes of txnHash itself
+  size_t len;
+  infile.read(reinterpret_cast<char*>(&len), sizeof(len));
+  infile.read(reinterpret_cast<char*>(&r_txn_hash), len);
+
+  // get the TxnReceipt length and raw bytes of TxnReceipt itself
+  infile.read(reinterpret_cast<char*>(&len), sizeof(len));
+  buff.resize(len);
+  infile.read(reinterpret_cast<char*>(buff.data()), len);
+
+  infile.close();
+
+  // Deserialize the TxnReceipt bytes
+  TransactionWithReceipt r_tr;
+  r_tr.Deserialize(buff, 0);
+
+  BOOST_CHECK_MESSAGE(r_tr.GetTransaction().GetTranID() == tx_hash,
+                      "Error: Transaction id shouldn't change after "
+                      "serailization and deserialization from binary file");
+
+  BOOST_CHECK_MESSAGE(
+      r_tr.GetTransaction().GetToAddr() == tx_body.GetTransaction().GetToAddr(),
+      "Error: ToAddress shouldn't change after "
+      "serailization and deserialization from binary file");
+
+  BOOST_CHECK_MESSAGE(
+      r_tr.GetTransaction().GetTranID() == r_txn_hash,
+      "Error: Transaction id field in binary file and  "
+      "that in deserialized TR from binary file should have been same");
+}
+
+BOOST_AUTO_TEST_CASE(testRandomBlockAccesses) {
+  INIT_STDOUT_LOGGER();
+
+  LOG_MARKER();
+  if (LOOKUP_NODE_MODE) {
+    TransactionWithReceipt body1 = constructDummyTxBody(1);
+    TransactionWithReceipt body2 = constructDummyTxBody(2);
+    TransactionWithReceipt body3 = constructDummyTxBody(3);
+    TransactionWithReceipt body4 = constructDummyTxBody(4);
+
+    auto tx_hash1 = body1.GetTransaction().GetTranID();
+    auto tx_hash2 = body2.GetTransaction().GetTranID();
+    auto tx_hash3 = body3.GetTransaction().GetTranID();
+    auto tx_hash4 = body4.GetTransaction().GetTranID();
+
+    bytes serializedTxBody;
 
     body1.Serialize(serializedTxBody, 0);
     BlockStorage::GetBlockStorage().PutTxBody(tx_hash1, serializedTxBody);
@@ -215,28 +213,32 @@ BOOST_AUTO_TEST_CASE(testRandomBlockAccesses)
     BlockStorage::GetBlockStorage().GetTxBody(tx_hash2, blockRetrieved);
 
     BOOST_CHECK_MESSAGE(
-        body2.GetTranID() == (*blockRetrieved).GetTranID(),
-        "transaction id shouldn't change after writing to/ reading from disk");
+        body2.GetTransaction().GetTranID() ==
+            (*blockRetrieved).GetTransaction().GetTranID(),
+        "transaction id shouldn't change after writing to/ reading from "
+        "disk");
 
     BlockStorage::GetBlockStorage().GetTxBody(tx_hash4, blockRetrieved);
 
     BOOST_CHECK_MESSAGE(
-        body4.GetTranID() == (*blockRetrieved).GetTranID(),
-        "transaction id shouldn't change after writing to/ reading from disk");
+        body4.GetTransaction().GetTranID() ==
+            (*blockRetrieved).GetTransaction().GetTranID(),
+        "transaction id shouldn't change after writing to/ reading from "
+        "disk");
 
     BlockStorage::GetBlockStorage().GetTxBody(tx_hash1, blockRetrieved);
 
     BOOST_CHECK_MESSAGE(
-        body1.GetTranID() == (*blockRetrieved).GetTranID(),
-        "transaction id shouldn't change after writing to/ reading from disk");
+        body1.GetTransaction().GetTranID() ==
+            (*blockRetrieved).GetTransaction().GetTranID(),
+        "transaction id shouldn't change after writing to/ reading from "
+        "disk");
 
     BOOST_CHECK_MESSAGE(
-        body2.GetTranID() != (*blockRetrieved).GetTranID(),
+        body2.GetTransaction().GetTranID() !=
+            (*blockRetrieved).GetTransaction().GetTranID(),
         "transaction id shouldn't be same for different blocks");
-
-#ifndef IS_LOOKUP_NODE
-    boost::filesystem::remove_all(p_txbodyDB);
-#endif // IS_LOOKUP_NODE
+  }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

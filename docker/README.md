@@ -1,21 +1,20 @@
-# Zilliqa container (Experimental)
+# Zilliqa Dockerfiles
 
-## Overview
-This repository contains a Dockerfile that can built into a Docker image containing the Zilliqa binaries.
+This folder includes multiple Dockerfiles
 
-## Building the Docker image
-Executing the following command will start building a Docker image of Zilliqa:
+- `Dockerfile`: The Dockerfile to build Zilliqa image
+- `Dockerfile.cuda`: The Dockerfile to build Zilliqa image with CUDA support
+- `dev/*`: Other Dockerfiles for development usage
 
-> docker build --rm -t zilliqa .
+## Getting Started
 
-This build step will fetch the Zilliqa sources, gather it's dependencies and build Zilliqa from source. The result is a Docker image that can be used to start up a Docker container.
+A few common commands are available in `Makefile`.
 
-> Note: by default the 'master' branch of the Zilliqa repo will be built in 'Debug' mode. You can specify an other branch and/or configuration by providing build arguments like so:
-> docker build --build-arg BRANCH=<branchname> --build-arg CONFIG=<Debug/Release> --rm -t zilliqa . 
+- `make`: build `release` and `release-cuda`
+- `make release`: build a release version image for public usage
+- `make release-cuda`: build a release version image with CUDA driver for public usage
 
-## Running a Docker container
-To start up a Docker container from the previously built Docker image, you can run the following command:
+Also for development:
 
-> docker run --rm -i -t zilliqa
-
-This will spawn a Docker container (running Ubuntu 16.04) which contains the entire source- and buildtree of Zilliqa. From there, you can run the deamon, test scripts, etc...
+- `make ci`: build CI image used by CI services for testing
+- `make k8s COMMIT=XXXXXXX`: build Zilliqa image for Kubernetes testnets

@@ -1,128 +1,163 @@
-/**
-* Copyright (c) 2018 Zilliqa
-* This source code is being disclosed to you solely for the purpose of your participation in
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to
-* the protocols and algorithms that are programmed into, and intended by, the code. You may
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd.,
-* including modifying or publishing the code (or any part of it), and developing or forming
-* another public or private blockchain network. This source code is provided ‘as is’ and no
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed.
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef __POW_H__
-#define __POW_H__
+#ifndef ZILLIQA_SRC_LIBPOW_POW_H_
+#define ZILLIQA_SRC_LIBPOW_POW_H_
 
-#include <array>
-#include <boost/multiprecision/cpp_int.hpp>
-#include <mutex>
 #include <stdint.h>
+#include <array>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated"
+#include "jsonrpccpp/client.h"
+#include "jsonrpccpp/client/connectors/httpclient.h"
+#pragma GCC diagnostic pop
 
 #include "common/Constants.h"
-#include "depends/libethash/ethash.h"
-#include "depends/libethash/internal.h"
-#include "libCrypto/Schnorr.h"
+#include "depends/common/Miner.h"
+#include "depends/libethash/include/ethash/ethash.hpp"
+//#include "ethash/ethash.hpp"
+#include <Schnorr.h>
+#include "libNetwork/Peer.h"
 #include "libUtils/Logger.h"
 
 /// Stores the result of PoW mining.
-typedef struct ethash_mining_result
-{
-    std::string result;
-    std::string mix_hash;
-    uint64_t winning_nonce;
-    bool success;
+typedef struct EthashMiningResult {
+  std::string result;
+  std::string mix_hash;
+  uint64_t winning_nonce{};
+  bool success{};
 } ethash_mining_result_t;
 
 /// Implements the proof-of-work functionality.
-class POW
-{
-    static std::string BytesToHexString(const uint8_t* str, const uint64_t s);
-    static std::string BlockhashToHexString(ethash_h256_t* _hash);
-    static int FromHex(char _i);
-    static std::vector<uint8_t> HexStringToBytes(std::string const& _s);
-    static ethash_h256_t StringToBlockhash(std::string const& _s);
-    static ethash_h256_t DifficultyLevelInInt(uint8_t difficulty);
-    std::mutex m_mutexLightClientConfigure;
-    std::mutex m_mutexPoWMine;
+class POW {
+  static std::string BytesToHexString(const uint8_t* str, const uint64_t s);
+  static int FromHex(char _i);
+  static bytes HexStringToBytes(std::string const& _s);
+  std::mutex m_mutexLightClientConfigure;
+  std::mutex m_mutexPoWMine;
 
-    POW();
-    ~POW();
+  POW();
+  ~POW();
 
-    POW(POW const&) = delete;
-    void operator=(POW const&) = delete;
+  POW(POW const&) = delete;
+  void operator=(POW const&) = delete;
 
-public:
-    /// Returns the singleton POW instance.
-    static POW& GetInstance();
+ public:
+  static ethash_hash256 StringToBlockhash(std::string const& _s);
+  static std::string BlockhashToHexString(const ethash_hash256& _hash);
+  static bool CheckDifficulty(const ethash_hash256& result,
+                              const ethash_hash256& boundary);
+  static size_t CountLeadingZeros(const ethash_hash256& boundary);
 
-    /// Initializes the POW hash function for the specified block number.
-    bool EthashConfigureLightClient(uint64_t block_number);
+  /// Returns the singleton POW instance.
+  static POW& GetInstance();
 
-    /// Triggers the proof-of-work mining.
-    ethash_mining_result_t
-    PoWMine(const boost::multiprecision::uint256_t& blockNum,
-            uint8_t difficulty,
-            const std::array<unsigned char, UINT256_SIZE>& rand1,
-            const std::array<unsigned char, UINT256_SIZE>& rand2,
-            const boost::multiprecision::uint128_t& ipAddr,
-            const PubKey& pubKey, bool fullDataset);
+  /// Initializes the POW hash function for the specified block number.
+  bool EthashConfigureClient(uint64_t block_number, bool fullDataset = false);
 
-    /// Terminates proof-of-work mining.
-    void StopMining();
+  static ethash_hash256 GenHeaderHash(
+      const std::array<unsigned char, UINT256_SIZE>& rand1,
+      const std::array<unsigned char, UINT256_SIZE>& rand2, const Peer& peer,
+      const PubKey& pubKey, uint32_t lookupId, const uint128_t& gasPrice);
 
-    /// Verifies a proof-of-work submission.
-    bool PoWVerify(const boost::multiprecision::uint256_t& blockNum,
-                   uint8_t difficulty,
-                   const std::array<unsigned char, UINT256_SIZE>& rand1,
-                   const std::array<unsigned char, UINT256_SIZE>& rand2,
-                   const boost::multiprecision::uint128_t& ipAddr,
-                   const PubKey& pubKey, bool fullDataset,
-                   uint64_t winning_nonce, std::string& winning_result,
-                   std::string& winning_mixhash);
+  /// Triggers the proof-of-work mining.
+  ethash_mining_result_t PoWMine(uint64_t blockNum, uint8_t difficulty,
+                                 const PairOfKey& pairOfKey,
+                                 const ethash_hash256& headerHash,
+                                 bool fullDataset, uint64_t startNonce,
+                                 int timeWindow);
 
-private:
-    ethash_light_t ethash_light_client;
-    uint64_t currentBlockNum;
-    bool shouldMine;
+  /// Terminates proof-of-work mining.
+  void StopMining();
 
-    ethash_light_t EthashLightNew(uint64_t block_number);
-    ethash_light_t EthashLightReuse(ethash_light_t ethashLight,
-                                    uint64_t block_number);
-    void EthashLightDelete(ethash_light_t light);
-    ethash_return_value_t EthashLightCompute(ethash_light_t& light,
-                                             ethash_h256_t const& header_hash,
-                                             uint64_t nonce);
-    ethash_full_t EthashFullNew(ethash_light_t& light,
-                                ethash_callback_t& callback);
-    void EthashFullDelete(ethash_full_t& full);
-    ethash_return_value_t EthashFullCompute(ethash_full_t& full,
-                                            ethash_h256_t const& header_hash,
-                                            uint64_t nonce);
-    ethash_mining_result_t MineLight(ethash_light_t& light,
-                                     ethash_h256_t const& header_hash,
-                                     ethash_h256_t& difficulty);
-    ethash_mining_result_t MineFull(ethash_full_t& full,
-                                    ethash_h256_t const& header_hash,
-                                    ethash_h256_t& difficulty);
-    std::vector<unsigned char>
-    ConcatAndhash(const std::array<unsigned char, UINT256_SIZE>& rand1,
-                  const std::array<unsigned char, UINT256_SIZE>& rand2,
-                  const boost::multiprecision::uint128_t& ipAddr,
-                  const PubKey& pubKey);
-    bool VerifyLight(ethash_light_t& light, ethash_h256_t const& header_hash,
-                     uint64_t winning_nonce, ethash_h256_t& difficulty,
-                     ethash_h256_t& winning_result,
-                     ethash_h256_t& winning_mixhash);
-    bool VerifyFull(ethash_full_t& full, ethash_h256_t const& header_hash,
-                    uint64_t winning_nonce, ethash_h256_t& difficulty,
-                    ethash_h256_t& winning_result,
-                    ethash_h256_t& winning_mixhash);
+  /// Verifies a proof-of-work submission.
+  bool PoWVerify(uint64_t blockNum, uint8_t difficulty,
+                 const ethash_hash256& headerHash, uint64_t winning_nonce,
+                 const std::string& winning_result,
+                 const std::string& winning_mixhash);
+  static bytes ConcatAndhash(
+      const std::array<unsigned char, UINT256_SIZE>& rand1,
+      const std::array<unsigned char, UINT256_SIZE>& rand2, const Peer& peer,
+      const PubKey& pubKey, uint32_t lookupId, const uint128_t& gasPrice);
+  static ethash_hash256 DifficultyLevelInInt(uint8_t difficulty);
+  static ethash_hash256 DifficultyLevelInIntDevided(uint8_t difficulty);
+  static uint8_t DevidedBoundaryToDifficulty(ethash_hash256 boundary);
+  ethash::result LightHash(uint64_t blockNum, ethash_hash256 const& headerHash,
+                           uint64_t nonce);
+  bool CheckSolnAgainstsTargetedDifficulty(const ethash_hash256& result,
+                                           uint8_t difficulty);
+  bool CheckSolnAgainstsTargetedDifficulty(const std::string& result,
+                                           uint8_t difficulty);
+  static std::set<unsigned int> GetGpuToUse();
+
+  // Put it to public function so can directly test with it
+  ethash_mining_result_t RemoteMine(const PairOfKey& pairOfKey,
+                                    uint64_t blockNum,
+                                    ethash_hash256 const& headerHash,
+                                    ethash_hash256 const& boundary,
+                                    int timeWindow);
+
+  bool SendWorkToProxy(const PairOfKey& pairOfKey, uint64_t blockNum,
+                       ethash_hash256 const& headerHash,
+                       ethash_hash256 const& boundary, int timeWindow);
+  bool CheckMiningResult(const PairOfKey& pairOfKey,
+                         ethash_hash256 const& headerHash,
+                         ethash_hash256 const& boundary, uint64_t& nonce,
+                         ethash_hash256& mixHash, int timeWindow);
+  bool VerifyRemoteSoln(uint64_t blockNum, ethash_hash256 const& boundary,
+                        uint64_t nonce, const ethash_hash256& headerHash,
+                        const ethash_hash256& mixHash,
+                        ethash_hash256& hashResult);
+  bool SendVerifyResult(const PairOfKey& pairOfKey,
+                        const ethash_hash256& headerHash,
+                        ethash_hash256 const& boundary, bool verifyResult);
+
+ private:
+  std::shared_ptr<ethash::epoch_context> m_epochContextLight = nullptr;
+  std::shared_ptr<ethash::epoch_context_full> m_epochContextFull = nullptr;
+  uint64_t m_currentBlockNum;
+  std::atomic<bool> m_shouldMine{};
+  std::vector<dev::eth::MinerPtr> m_miners;
+  std::vector<ethash_mining_result_t> m_vecMiningResult;
+  std::atomic<int> m_minerIndex{};
+  std::condition_variable m_cvMiningResult;
+  std::mutex m_mutexMiningResult;
+  std::unique_ptr<jsonrpc::HttpClient> m_httpClient;
+
+  ethash_mining_result_t MineLight(ethash_hash256 const& headerHash,
+                                   ethash_hash256 const& boundary,
+                                   uint64_t startNonce, int timeWindow);
+  ethash_mining_result_t MineFull(ethash_hash256 const& headerHash,
+                                  ethash_hash256 const& boundary,
+                                  uint64_t startNonce, int timeWindow);
+  ethash_mining_result_t MineGetWork(uint64_t blockNum,
+                                     ethash_hash256 const& headerHash,
+                                     uint8_t difficulty, int timeWindow);
+  ethash_mining_result_t MineFullGPU(uint64_t blockNum,
+                                     ethash_hash256 const& headerHash,
+                                     uint8_t difficulty, uint64_t startNonce,
+                                     int timeWindow);
+  void MineFullGPUThread(uint64_t blockNum, ethash_hash256 const& headerHash,
+                         uint8_t difficulty, uint64_t nonce, int timeWindow);
+  void InitOpenCL();
+  void InitCUDA();
 };
-#endif // __POW_H__
+#endif  // ZILLIQA_SRC_LIBPOW_POW_H_

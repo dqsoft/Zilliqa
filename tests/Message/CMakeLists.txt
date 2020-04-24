@@ -1,0 +1,35 @@
+link_directories(${CMAKE_BINARY_DIR}/lib)
+configure_file(${CMAKE_SOURCE_DIR}/constants.xml constants.xml COPYONLY)
+
+add_executable(Test_Messenger_Limits Test_Messenger_Limits.cpp)
+target_include_directories (Test_Messenger_Limits PUBLIC ${CMAKE_BINARY_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(Test_Messenger_Limits PUBLIC AccountData Message Boost::unit_test_framework Utils TestUtils)
+add_test(NAME Test_Messenger_Limits COMMAND Test_Messenger_Limits)
+
+add_executable(Test_Messenger_Primitives Test_Messenger_Primitives.cpp)
+target_include_directories (Test_Messenger_Primitives PUBLIC ${CMAKE_BINARY_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(Test_Messenger_Primitives PUBLIC AccountData Message Boost::unit_test_framework Utils TestUtils)
+add_test(NAME Test_Messenger_Primitives COMMAND Test_Messenger_Primitives)
+
+add_executable(Test_Messenger_Consensus Test_Messenger_Consensus.cpp)
+target_include_directories (Test_Messenger_Consensus PUBLIC ${CMAKE_BINARY_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(Test_Messenger_Consensus PUBLIC AccountData Message Boost::unit_test_framework Utils TestUtils)
+add_test(NAME Test_Messenger_Consensus COMMAND Test_Messenger_Consensus)
+
+add_executable(Test_MessageName Test_MessageName.cpp)
+target_include_directories (Test_MessageName PUBLIC ${CMAKE_BINARY_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(Test_MessageName PUBLIC Zilliqa Validator Boost::unit_test_framework Utils)
+add_test(NAME Test_MessageName COMMAND Test_MessageName)
+
+set(PROTOBUF_IMPORT_DIRS ${PROTOBUF_IMPORT_DIRS} ${PROJECT_SOURCE_DIR}/tests/Message)
+protobuf_generate_cpp(PROTO_SRC PROTO_HEADER ZilliqaTest.proto)
+add_executable(Test_Messenger_Compatibility ${PROTO_HEADER} ${PROTO_SRC} Test_Messenger_Compatibility.cpp)
+get_target_property(TESTMESSENGERCOMPATIBILITY_COMPILE_FLAGS Test_Messenger_Compatibility COMPILE_OPTIONS )
+message(STATUS "Test_Messenger_Compatibility compile flags old = ${TESTMESSENGERCOMPATIBILITY_COMPILE_FLAGS}")
+list(REMOVE_ITEM TESTMESSENGERCOMPATIBILITY_COMPILE_FLAGS -Wextra -Werror)
+message(STATUS "Test_Messenger_Compatibility compile flags new = ${TESTMESSENGERCOMPATIBILITY_COMPILE_FLAGS}")
+set_target_properties(Test_Messenger_Compatibility PROPERTIES COMPILE_OPTIONS "${TESTMESSENGERCOMPATIBILITY_COMPILE_FLAGS}")
+
+target_include_directories (Test_Messenger_Compatibility PUBLIC ${CMAKE_BINARY_DIR}/src ${CMAKE_BINARY_DIR}/tests ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(Test_Messenger_Compatibility PUBLIC Boost::unit_test_framework Utils protobuf Block BlockHeader TestUtils Lookup Node Mediator DirectoryService)
+add_test(NAME Test_Messenger_Compatibility COMMAND Test_Messenger_Compatibility)

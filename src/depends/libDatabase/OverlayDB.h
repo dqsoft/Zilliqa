@@ -37,8 +37,9 @@ namespace dev
 		~OverlayDB() = default;
 
 		void ResetDB();
+		bool RefreshDB();
 
-		void commit();
+		bool commit();
 		void rollback();
 
 		std::string lookup(h256 const& _h) const;

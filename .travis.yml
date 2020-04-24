@@ -3,58 +3,55 @@ cache:
   directories:
     - $HOME/.ccache/
 
-# multiplied by platform
-os:
-  - osx
-  - linux
+matrix:
+  include:
+    - os: linux
+      dist: xenial
+    # - os: osx
+    #  osx_image: xcode10.1
 
-# multiplied by BUILD_COMMAND
-env:
-  matrix:
-    - BUILD_COMMAND="./scripts/ci_build.sh"
-    - BUILD_COMMAND="./scripts/ci_build.sh lookup"
-
-before_install:
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-      docker pull ubuntu:16.04;
-      docker run -d -v $(pwd):/zilliqa -v $HOME/.ccache:/root/.ccache -w /zilliqa --name ci ubuntu:16.04 tail -f /dev/null;
-    fi
-
-install:
-  # note: use option '-t' for 'docker exec' to enable colored output
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-      docker exec -e CI="true" -t ci /bin/sh -c "./scripts/ci_install_deps.sh";
-    else
-      ./scripts/ci_install_deps.sh;
-    fi
+addons:
+  apt:
+    update: true
+    packages:
+    # APT packages are organized into two groups, build dependency and 
+    # development dependency, where the former is necessary for users who
+    # want to build Zilliqa whereas the latter is only for CI.
+    # Note that the names are sorted in each group.
+    #
+    # Build dependency
+    - build-essential
+    - cmake
+    - libboost-filesystem-dev
+    - libboost-program-options-dev
+    - libboost-system-dev
+    - libboost-test-dev
+    - libboost-python-dev
+    - libcurl4-openssl-dev
+    - libevent-dev
+    - libjsoncpp-dev
+    - libjsonrpccpp-dev
+    - libleveldb-dev
+    - libmicrohttpd-dev
+    - libminiupnpc-dev
+    - libsnappy-dev
+    - libssl-dev
+    - pkg-config
+    # Development dependency
+    - ccache
+    - clang-5.0
+    - clang-format-5.0
+    - clang-tidy-5.0
+    - curl
+    - gawk
+    - git
+    - lcov
+    - libxml2-utils
+    - python-pip
 
 script:
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-      docker exec -t ci /bin/sh -c "$BUILD_COMMAND";
-    else
-      $BUILD_COMMAND;
-    fi
+  - ./scripts/ci_build.sh;
 
 # Code coverage is currently only implemented for GCC builds, so OSX is currently excluded from reporting
 after_success:
-  - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-      docker exec -e CI="true" -e TRAVIS="$TRAVIS" -e TRAVIS_PULL_REQUEST_SHA="$TRAVIS_PULL_REQUEST_SHA" -e TRAVIS_COMMIT="$TRAVIS_COMMIT" -e TRAVIS_JOB_NUMBER="$TRAVIS_JOB_NUMBER" -e TRAVIS_PULL_REQUEST="$TRAVIS_PULL_REQUEST" -e TRAVIS_JOB_ID="$TRAVIS_JOB_ID" -e TRAVIS_REPO_SLUG="$TRAVIS_REPO_SLUG" -e TRAVIS_OS_NAME="$TRAVIS_OS_NAME" -e TRAVIS_TAG="$TRAVIS_TAG" -e TRAVIS_BRANCH="$TRAVIS_BRANCH" -t ci /bin/sh -c "./scripts/ci_report_coverage.sh";
-    fi
-
-stages:
-  - test
-  - name: deploy
-    if: type = push
-
-jobs:
-  include:
-  - stage: deploy
-    os: linux
-    sudo: required
-    env: BUILD_COMMAND="./scripts/ci_make_image.sh"
-    before_install: # left blank
-    install: # left blank
-    cache: # left blank
-    script:
-    - $BUILD_COMMAND
-    after_success: # left blank
+  - ./scripts/ci_report_coverage.sh

@@ -1,18 +1,19 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
 
 #ifndef __LEVELDB_H__
@@ -29,45 +30,51 @@
 #include "depends/common/FixedHash.h"
 //#include "libUtils/Logger.h"
 
-leveldb::Slice toSlice(boost::multiprecision::uint256_t num); 
+leveldb::Slice toSlice(boost::multiprecision::uint256_t num);
 
 /// Utility class for providing database-type storage.
 class LevelDB
 {
     std::string m_dbName;
-    
-#ifndef IS_LOOKUP_NODE
+
     std::string m_subdirectory;
-#endif // IS_LOOKUP_NODE
 
     std::shared_ptr<leveldb::DB> m_db;
-    
+
+    leveldb::Options m_options;
+
+    std::string m_open_db_path;
+
 public:
 
     /// Constructor.
-#ifndef IS_LOOKUP_NODE
-    explicit LevelDB(const std::string & dbName, const std::string & subdirectory = "");
-#else //IS_LOOKUP_NODE
-    explicit LevelDB(const std::string & dbName);
-#endif //IS_LOOKUP_NODE
-
+    explicit LevelDB(const std::string & dbName, const std::string& subdirectory = "", bool diagnostic = false);
+    explicit LevelDB(const std::string& dbName, const std::string& path, const std::string& subdirectory = "");
     /// Destructor.
     ~LevelDB() = default;
+
+    /// manually compact, might be helpful in future
+    void compact () {
+        m_db->CompactRange(NULL, NULL);
+    }
+
+    /// Reopen the leveldb object to trigger compact and cleaning of LOG/MANIFEST files
+    void Reopen();
 
     /// Returns the reference to the leveldb database instance.
     std::shared_ptr<leveldb::DB> GetDB();
 
-#ifndef IS_LOOKUP_NODE
-    std::string GetDBName() { return m_dbName + (m_subdirectory.size() > 0 ? "/" : "") + m_subdirectory; }
-#else //IS_LOOKUP_NODE
-    std::string GetDBName() { return m_dbName; }
-#endif //IS_LOOKUP_NODE
+    /// Returns the DB Name
+    std::string GetDBName();
 
     /// Returns the value at the specified key.
     std::string Lookup(const std::string & key) const;
 
     /// Returns the value at the specified key.
     std::string Lookup(const boost::multiprecision::uint256_t & blockNum) const;
+
+    /// Returns the value at the specified key and also mark if key was found or not
+    std::string Lookup(const boost::multiprecision::uint256_t & blockNum, bool &found) const;
 
     /// Returns the value at the specified key.
     std::string Lookup(const dev::h256 & key) const;
@@ -79,11 +86,11 @@ public:
     int Insert(const dev::h256 & key, dev::bytesConstRef value);
 
     /// Sets the value at the specified key.
-    int Insert(const boost::multiprecision::uint256_t & blockNum, 
+    int Insert(const boost::multiprecision::uint256_t & blockNum,
                const std::vector<unsigned char> & body);
 
     /// Sets the value at the specified key.
-    int Insert(const boost::multiprecision::uint256_t & blockNum, 
+    int Insert(const boost::multiprecision::uint256_t & blockNum,
                const std::string & body);
 
     /// Sets the value at the specified key.
@@ -102,8 +109,12 @@ public:
     int Insert(const leveldb::Slice & key, const leveldb::Slice & value);
 
     /// Sets the value at the specified key for multiple such pairs.
-    int BatchInsert(std::unordered_map<dev::h256, std::pair<std::string, unsigned>> & m_main,
-                    std::unordered_map<dev::h256, std::pair<dev::bytes, bool>> & m_aux);
+    bool BatchInsert(const std::unordered_map<dev::h256, std::pair<std::string, unsigned>> & m_main,
+                     const std::unordered_map<dev::h256, std::pair<dev::bytes, bool>> & m_aux);
+    bool BatchInsert(const std::unordered_map<std::string, std::string>& kv_map);
+
+    /// Remove the kv pair for multiple specified key.
+    bool BatchDelete(const std::vector<dev::h256>& toDelete);
 
     /// Returns true if value corresponding to specified key exists.
     bool Exists(const dev::h256 & key) const;
@@ -121,9 +132,18 @@ public:
 
     /// Deletes the entire database.
     int DeleteDB();
+    int DeleteDBForNormalNode();
+    int DeleteDBForLookupNode();
 
     /// Reset the entire database.
     bool ResetDB();
+
+    /// Refresh the entire database.
+    bool RefreshDB();
+
+private:
+    bool ResetDBForNormalNode();
+    bool ResetDBForLookupNode();
 };
 
 #endif // __LEVELDB_H__

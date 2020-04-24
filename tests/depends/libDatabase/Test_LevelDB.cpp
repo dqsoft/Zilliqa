@@ -1,7 +1,19 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This is an alpha (internal) release and is not suitable for production.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include <arpa/inet.h>
 #include <array>
@@ -12,7 +24,6 @@
 #define BOOST_TEST_MODULE trietest
 #define BOOST_TEST_DYN_LINK
 #include <boost/filesystem/path.hpp>
-#include <boost/multiprecision/cpp_int.hpp>
 #include <boost/test/unit_test.hpp>
 
 #include "depends/common/CommonIO.h"
@@ -26,31 +37,28 @@ using namespace dev;
 
 BOOST_AUTO_TEST_SUITE(trietest)
 
-BOOST_AUTO_TEST_CASE(fat_trie)
-{
-    INIT_STDOUT_LOGGER();
+BOOST_AUTO_TEST_CASE(fat_trie) {
+  INIT_STDOUT_LOGGER();
 
-    LOG_MARKER();
+  LOG_MARKER();
 
-    LevelDB m_testDB("test");
+  LevelDB m_testDB("test");
 
-    m_testDB.Insert((boost::multiprecision::uint256_t)1, "ABB");
+  m_testDB.Insert((uint256_t)1, "ABB");
 
-    BOOST_CHECK_MESSAGE(m_testDB.Lookup((boost::multiprecision::uint256_t)1)
-                            == "ABB",
-                        "ERROR: (boost_int, string)");
+  BOOST_CHECK_MESSAGE(m_testDB.Lookup((uint256_t)1) == "ABB",
+                      "ERROR: (boost_int, string)");
 
-    m_testDB.Insert((boost::multiprecision::uint256_t)2, "apples");
+  m_testDB.Insert((uint256_t)2, "apples");
 
-    BOOST_CHECK_MESSAGE(m_testDB.Lookup((boost::multiprecision::uint256_t)2)
-                            == "apples",
-                        "ERROR: (boost_int, string)");
+  BOOST_CHECK_MESSAGE(m_testDB.Lookup((uint256_t)2) == "apples",
+                      "ERROR: (boost_int, string)");
 
-    std::vector<unsigned char> mangoMsg = {'m', 'a', 'n', 'g', 'o'};
+  bytes mangoMsg = {'m', 'a', 'n', 'g', 'o'};
 
-    m_testDB.Insert((boost::multiprecision::uint256_t)3, mangoMsg);
+  m_testDB.Insert((uint256_t)3, mangoMsg);
 
-    LOG_GENERAL(INFO, m_testDB.Lookup((boost::multiprecision::uint256_t)3));
+  LOG_GENERAL(INFO, m_testDB.Lookup((uint256_t)3));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

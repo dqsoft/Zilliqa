@@ -28,8 +28,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <boost/multiprecision/cpp_int.hpp>
-
 #include "vector_ref.h"
 
 // Binary data types.
@@ -127,6 +125,7 @@ namespace dev
 
     // Null/Invalid values for convenience.
     extern bytes const NullBytes;
+    extern u128 const Invalid128;
     extern u256 const Invalid256;
 
     /// Get the current time in seconds since the epoch in UTC

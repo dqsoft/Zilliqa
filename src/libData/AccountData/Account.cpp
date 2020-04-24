@@ -1,407 +1,523 @@
-/**
-* Copyright (c) 2018 Zilliqa
-* This source code is being disclosed to you solely for the purpose of your participation in
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to
-* the protocols and algorithms that are programmed into, and intended by, the code. You may
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd.,
-* including modifying or publishing the code (or any part of it), and developing or forming
-* another public or private blockchain network. This source code is provided ‘as is’ and no
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed.
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include <boost/lexical_cast.hpp>
 
 #include "Account.h"
+#include "common/Messages.h"
 #include "depends/common/CommonIO.h"
 #include "depends/common/FixedHash.h"
 #include "depends/common/RLP.h"
 #include "libCrypto/Sha2.h"
-#include "libPersistence/ContractStorage.h"
+#include "libMessage/Messenger.h"
+#include "libPersistence/ContractStorage2.h"
 #include "libUtils/DataConversion.h"
+#include "libUtils/JsonUtils.h"
 #include "libUtils/Logger.h"
+#include "libUtils/SafeMath.h"
 
-Account::Account() {}
+using namespace std;
+using namespace boost::multiprecision;
+using namespace dev;
 
-Account::Account(const vector<unsigned char>& src, unsigned int offset)
-{
-    if (Deserialize(src, offset) != 0)
-    {
-        LOG_GENERAL(WARNING, "We failed to init Account.");
-    }
+using namespace Contract;
+
+// =======================================
+// AccountBase
+
+AccountBase::AccountBase(const uint128_t& balance, const uint64_t& nonce,
+                         const uint32_t& version)
+    : m_version(version),
+      m_balance(balance),
+      m_nonce(nonce),
+      m_storageRoot(h256()),
+      m_codeHash(h256()) {}
+
+bool AccountBase::Serialize(bytes& dst, unsigned int offset) const {
+  if (!Messenger::SetAccountBase(dst, offset, *this)) {
+    LOG_GENERAL(WARNING, "Messenger::SetAccount failed.");
+    return false;
+  }
+
+  return true;
 }
 
-Account::Account(const uint256_t& balance, const uint256_t& nonce)
-    : m_balance(balance)
-    , m_nonce(nonce)
-    , m_storageRoot(h256())
-    , m_codeHash(h256())
-{
+bool AccountBase::Deserialize(const bytes& src, unsigned int offset) {
+  // LOG_MARKER();
+
+  if (!Messenger::GetAccountBase(src, offset, *this)) {
+    LOG_GENERAL(WARNING, "Messenger::GetAccount failed.");
+    return false;
+  }
+
+  return true;
 }
 
-void Account::InitStorage()
-{
-    LOG_MARKER();
-    m_storage = AccountTrieDB<dev::h256, OverlayDB>(
-        &(ContractStorage::GetContractStorage().GetStateDB()));
-    m_storage.init();
-    if (m_storageRoot != h256())
-    {
-        m_storage.setRoot(m_storageRoot);
-        m_prevRoot = m_storageRoot;
-    }
+void AccountBase::SetVersion(const uint32_t& version) { m_version = version; }
+
+const uint32_t& AccountBase::GetVersion() const { return m_version; }
+
+bool AccountBase::IncreaseBalance(const uint128_t& delta) {
+  return SafeMath<uint128_t>::add(m_balance, delta, m_balance);
 }
 
-void Account::InitContract(const vector<unsigned char>& data)
-{
-    if (data.empty())
-    {
-        m_initValJson = Json::arrayValue;
-        return;
-    }
-    Json::CharReaderBuilder builder;
-    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-    Json::Value root;
-    string dataStr(data.begin(), data.end());
-    string errors;
-    if (!reader->parse(dataStr.c_str(), dataStr.c_str() + dataStr.size(), &root,
-                       &errors))
-    {
-        LOG_GENERAL(WARNING,
-                    "Failed to parse initialization contract json: " << errors);
-        return;
-    }
-    m_initValJson = root;
-    for (auto& v : root)
-    {
-        if (!v.isMember("vname") || !v.isMember("type") || !v.isMember("value"))
-        {
-            LOG_GENERAL(
-                WARNING,
-                "This variable in initialization of contract is corrupted");
-            continue;
+bool AccountBase::DecreaseBalance(const uint128_t& delta) {
+  if (m_balance < delta) {
+    return false;
+  }
+
+  return SafeMath<uint128_t>::sub(m_balance, delta, m_balance);
+}
+
+bool AccountBase::ChangeBalance(const int256_t& delta) {
+  return (delta >= 0) ? IncreaseBalance(uint128_t(delta))
+                      : DecreaseBalance(uint128_t(-delta));
+}
+
+void AccountBase::SetBalance(const uint128_t& balance) { m_balance = balance; }
+
+const uint128_t& AccountBase::GetBalance() const { return m_balance; }
+
+bool AccountBase::IncreaseNonce() {
+  return SafeMath<uint64_t>::add(m_nonce, 1, m_nonce);
+}
+
+bool AccountBase::IncreaseNonceBy(const uint64_t& nonceDelta) {
+  return SafeMath<uint64_t>::add(m_nonce, nonceDelta, m_nonce);
+}
+
+void AccountBase::SetNonce(const uint64_t& nonce) { m_nonce = nonce; }
+
+const uint64_t& AccountBase::GetNonce() const { return m_nonce; }
+
+void Account::SetAddress(const Address& addr) {
+  if (!m_address) {
+    m_address = addr;
+  }
+}
+
+const Address& Account::GetAddress() const { return m_address; }
+
+void AccountBase::SetStorageRoot(const h256& root) { m_storageRoot = root; }
+
+const dev::h256& AccountBase::GetStorageRoot() const { return m_storageRoot; }
+
+void AccountBase::SetCodeHash(const dev::h256& codeHash) {
+  m_codeHash = codeHash;
+}
+
+const dev::h256& AccountBase::GetCodeHash() const { return m_codeHash; }
+
+bool AccountBase::isContract() const { return m_codeHash != dev::h256(); }
+
+// =======================================
+// Account
+Account::Account(const bytes& src, unsigned int offset) {
+  if (!Deserialize(src, offset)) {
+    LOG_GENERAL(WARNING, "We failed to init Account.");
+  }
+}
+
+Account::Account(const uint128_t& balance, const uint64_t& nonce,
+                 const uint32_t& version)
+    : AccountBase(balance, nonce, version) {}
+
+bool Account::InitContract(const bytes& code, const bytes& initData,
+                           const Address& addr, const uint64_t& blockNum) {
+  LOG_MARKER();
+  if (isContract()) {
+    LOG_GENERAL(WARNING, "Already Initialized");
+    return false;
+  }
+
+  if (!PrepareInitDataJson(initData, addr, blockNum, m_initDataJson,
+                           m_scilla_version, m_is_library, m_extlibs)) {
+    LOG_GENERAL(WARNING, "PrepareInitDataJson failed");
+    return false;
+  }
+
+  if (!SetImmutable(code, DataConversion::StringToCharArray(
+                              JSONUtils::GetInstance().convertJsontoStr(
+                                  m_initDataJson)))) {
+    LOG_GENERAL(WARNING, "SetImmutable failed");
+  }
+
+  SetAddress(addr);
+
+  return true;
+}
+
+bool Account::Serialize(bytes& dst, unsigned int offset) const {
+  if (!Messenger::SetAccount(dst, offset, *this)) {
+    LOG_GENERAL(WARNING, "Messenger::SetAccount failed.");
+    return false;
+  }
+
+  return true;
+}
+
+bool Account::Deserialize(const bytes& src, unsigned int offset) {
+  // LOG_MARKER();
+  // This function is depreciated.
+  if (!Messenger::GetAccount(src, offset, *this)) {
+    LOG_GENERAL(WARNING, "Messenger::GetAccount failed.");
+    return false;
+  }
+
+  return true;
+}
+
+bool Account::SerializeBase(bytes& dst, unsigned int offset) const {
+  return AccountBase::Serialize(dst, offset);
+}
+
+bool Account::DeserializeBase(const bytes& src, unsigned int offset) {
+  // LOG_MARKER();
+
+  return AccountBase::Deserialize(src, offset);
+}
+
+bool Account::ParseInitData(const Json::Value& root, uint32_t& scilla_version,
+                            bool& is_library, vector<Address>& extlibs) {
+  is_library = false;
+  extlibs.clear();
+
+  bool found_scilla_version = false;
+  bool found_library = false;
+  bool found_extlibs = false;
+  for (const auto& entry : root) {
+    if (entry.isMember("vname") && entry.isMember("type") &&
+        entry.isMember("value")) {
+      if (entry["vname"].asString() == "_scilla_version" &&
+          entry["type"].asString() == "Uint32") {
+        if (found_scilla_version) {
+          LOG_GENERAL(WARNING, "Got multiple field of \"_scilla_version\"");
+          return false;
         }
-        string vname = v["vname"].asString();
-        string type = v["type"].asString();
-
-        Json::StreamWriterBuilder writeBuilder;
-        std::unique_ptr<Json::StreamWriter> writer(
-            writeBuilder.newStreamWriter());
-        ostringstream oss;
-        writer->write(v["value"], &oss);
-        string value = oss.str();
-
-        SetStorage(vname, type, value, false);
-    }
-}
-
-unsigned int Account::Serialize(vector<unsigned char>& dst,
-                                unsigned int offset) const
-{
-    // LOG_MARKER();
-
-    unsigned int size_needed = ACCOUNT_SIZE;
-    unsigned int size_remaining = dst.size() - offset;
-
-    if (size_remaining < size_needed)
-    {
-        dst.resize(size_needed + offset);
-    }
-
-    unsigned int curOffset = offset;
-
-    // Balance
-    SetNumber<uint256_t>(dst, curOffset, m_balance, UINT256_SIZE);
-    curOffset += UINT256_SIZE;
-    // Nonce
-    SetNumber<uint256_t>(dst, curOffset, m_nonce, UINT256_SIZE);
-    curOffset += UINT256_SIZE;
-    // Storage Root
-    copy(m_storageRoot.asArray().begin(), m_storageRoot.asArray().end(),
-         dst.begin() + curOffset);
-    curOffset += COMMON_HASH_SIZE;
-    // Code Hash
-    copy(m_codeHash.asArray().begin(), m_codeHash.asArray().end(),
-         dst.begin() + curOffset);
-    curOffset += COMMON_HASH_SIZE;
-    // Size of Code Content
-    SetNumber<uint256_t>(dst, curOffset, uint256_t(m_codeCache.size()),
-                         UINT256_SIZE);
-    curOffset += UINT256_SIZE;
-    // Code
-    if (m_codeCache.size() != 0)
-    {
-        copy(m_codeCache.begin(), m_codeCache.end(), dst.begin() + curOffset);
-        curOffset += m_codeCache.size();
-    }
-
-    return size_needed;
-}
-
-int Account::Deserialize(const vector<unsigned char>& src, unsigned int offset)
-{
-    LOG_MARKER();
-
-    try
-    {
-        unsigned int curOffset = offset;
-
-        // Balance
-        m_balance = GetNumber<uint256_t>(src, curOffset, UINT256_SIZE);
-        curOffset += UINT256_SIZE;
-        // Nonce
-        m_nonce = GetNumber<uint256_t>(src, curOffset, UINT256_SIZE);
-        curOffset += UINT256_SIZE;
-        // Storage Root
-        copy(src.begin() + curOffset,
-             src.begin() + curOffset + COMMON_HASH_SIZE,
-             m_storageRoot.asArray().begin());
-        curOffset += COMMON_HASH_SIZE;
-        // Code Hash
-        copy(src.begin() + curOffset,
-             src.begin() + curOffset + COMMON_HASH_SIZE,
-             m_codeHash.asArray().begin());
-        curOffset += COMMON_HASH_SIZE;
-        // Size of Code
-        // FIXME: To fix the casting
-        unsigned int codeSize
-            = (unsigned int)GetNumber<uint256_t>(src, curOffset, UINT256_SIZE);
-        curOffset += UINT256_SIZE;
-        // Code
-        if (codeSize > 0)
-        {
-            vector<unsigned char> code;
-            code.resize(codeSize);
-            copy(src.begin() + curOffset, src.begin() + curOffset + codeSize,
-                 code.begin());
-            SetCode(code);
-            curOffset += codeSize;
+        try {
+          scilla_version =
+              boost::lexical_cast<uint32_t>(entry["value"].asString());
+          found_scilla_version = true;
+        } catch (...) {
+          LOG_GENERAL(WARNING,
+                      "invalid value for _scilla_version " << entry["value"]);
+          return false;
         }
-    }
-    catch (const std::exception& e)
-    {
-        LOG_GENERAL(WARNING,
-                    "Error with Account::Deserialize." << ' ' << e.what());
-        return -1;
-    }
-    return 0;
-}
+        // break;
+        if (found_library && found_extlibs) {
+          break;
+        }
+      }
 
-bool Account::IncreaseBalance(const uint256_t& delta)
-{
-    m_balance += delta;
-    return true;
-}
+      if (entry["vname"].asString() == "_library" &&
+          entry["type"].asString() == "Bool") {
+        if (found_library) {
+          LOG_GENERAL(WARNING, "Got multiple field of \"_library\"");
+          return false;
+        }
+        if (entry["value"].isMember("constructor") &&
+            entry["value"]["constructor"] == "True") {
+          is_library = true;
+        }
+        found_library = true;
+        if (found_scilla_version && found_extlibs) {
+          break;
+        }
+      }
 
-bool Account::DecreaseBalance(const uint256_t& delta)
-{
-    if (m_balance < delta)
-    {
-        return false;
-    }
-
-    m_balance -= delta;
-    return true;
-}
-
-bool Account::IncreaseNonce()
-{
-    ++m_nonce;
-    return true;
-}
-
-void Account::SetStorageRoot(const h256& root)
-{
-    if (!isContract())
-    {
-        return;
-    }
-    m_storageRoot = root;
-
-    if (m_storageRoot == h256())
-    {
-        return;
-    }
-
-    m_storage.setRoot(m_storageRoot);
-    m_prevRoot = m_storageRoot;
-}
-
-void Account::SetStorage(string k, string type, string v, bool is_mutable)
-{
-    if (!isContract())
-    {
-        return;
-    }
-    RLPStream rlpStream(4);
-    rlpStream << k << (is_mutable ? "True" : "False") << type << v;
-
-    m_storage.insert(GetKeyHash(k), rlpStream.out());
-
-    m_storageRoot = m_storage.root();
-}
-
-vector<string> Account::GetStorage(string _k) const
-{
-    if (!isContract())
-    {
-        return {};
-    }
-
-    dev::RLP rlp(m_storage.at(GetKeyHash(_k)));
-    // mutable, type, value
-    return {rlp[1].toString(), rlp[2].toString(), rlp[3].toString()};
-}
-
-Json::Value Account::GetStorageJson() const
-{
-    if (!isContract())
-    {
-        return Json::arrayValue;
-    }
-
-    Json::Value root;
-    for (auto const& i : m_storage)
-    {
-        dev::RLP rlp(i.second);
-        string tVname = rlp[0].toString();
-        string tMutable = rlp[1].toString();
-        string tType = rlp[2].toString();
-        string tValue = rlp[3].toString();
-        LOG_GENERAL(INFO,
-                    "\nvname: " << tVname << " \nmutable: " << tMutable
-                                << " \ntype: " << tType
-                                << " \nvalue: " << tValue);
-        if (tMutable == "False")
-        {
-            continue;
+      if (entry["vname"].asString() == "_extlibs") {
+        if (found_extlibs) {
+          LOG_GENERAL(WARNING, "Got multiple field of \"_extlibs\"");
+          return false;
         }
 
-        Json::Value item;
-        item["vname"] = tVname;
-        item["type"] = tType;
-        if (tType == "Map" || tType == "ADT")
-        {
-            Json::CharReaderBuilder builder;
-            std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-            Json::Value obj;
-            string errors;
-            if (!reader->parse(tValue.c_str(), tValue.c_str() + tValue.size(),
-                               &obj, &errors))
-            {
-                LOG_GENERAL(
-                    WARNING,
-                    "The map json object cannot be extracted from Storage: "
-                        << errors);
-                continue;
+        if (entry["value"].type() != Json::arrayValue) {
+          LOG_GENERAL(WARNING, "entry value is not array type");
+          return false;
+        }
+
+        for (const auto& lib_entry : entry["value"]) {
+          if (lib_entry.isMember("arguments") &&
+              lib_entry["arguments"].type() == Json::arrayValue &&
+              lib_entry["arguments"].size() == 2) {
+            bool foundAddr = false;
+            for (const auto& arg : lib_entry["arguments"]) {
+              if (arg.asString().size() == ((ACC_ADDR_SIZE * 2) + 2) &&
+                  arg.asString().find("0x") != std::string::npos) {
+                try {
+                  Address addr(arg.asString());
+                  extlibs.emplace_back(addr);
+                  foundAddr = true;
+                  break;
+                } catch (...) {
+                  LOG_GENERAL(WARNING, "invalid to convert string to address: "
+                                           << arg.asString());
+                  continue;
+                }
+              }
             }
-            item["value"] = obj;
+
+            if (!foundAddr) {
+              LOG_GENERAL(WARNING, "Didn't find address for extlib");
+              return false;
+            }
+
+            break;
+          }
         }
-        else
-        {
-            item["value"] = tValue;
+
+        found_extlibs = true;
+
+        if (found_scilla_version && found_library) {
+          break;
         }
-        root.append(item);
+      }
+    } else {
+      LOG_GENERAL(WARNING, "Wrong data format spotted");
+      return false;
     }
-    Json::Value balance;
-    balance["vname"] = "_balance";
-    balance["type"] = "Int";
-    balance["value"] = GetBalance().convert_to<string>();
-    root.append(balance);
+  }
 
-    LOG_GENERAL(INFO, "States: " << root);
+  if (!found_scilla_version) {
+    LOG_GENERAL(WARNING, "scilla_version not found in init data");
+    return false;
+  }
 
-    return root;
+  return true;
 }
 
-void Account::RollBack()
-{
-    if (!isContract())
-    {
-        LOG_GENERAL(WARNING, "Not a contract, meaningless to call RollBack");
-        return;
-    }
-    m_storageRoot = m_prevRoot;
-    if (m_storageRoot != h256())
-    {
-        m_storage.setRoot(m_storageRoot);
-    }
-    else
-    {
-        m_storage.init();
-    }
+bool Account::PrepareInitDataJson(const bytes& initData, const Address& addr,
+                                  const uint64_t& blockNum, Json::Value& root,
+                                  uint32_t& scilla_version, bool& is_library,
+                                  vector<Address>& extlibs) {
+  if (initData.empty()) {
+    LOG_GENERAL(WARNING, "Init data for the contract is empty");
+    return false;
+  }
+
+  if (!JSONUtils::GetInstance().convertStrtoJson(
+          DataConversion::CharArrayToString(initData), root)) {
+    return false;
+  }
+
+  if (!ParseInitData(root, scilla_version, is_library, extlibs)) {
+    LOG_GENERAL(WARNING, "ParseInitData failed");
+    return false;
+  }
+
+  // Append createBlockNum
+  Json::Value createBlockNumObj;
+  createBlockNumObj["vname"] = "_creation_block";
+  createBlockNumObj["type"] = "BNum";
+  createBlockNumObj["value"] = to_string(blockNum);
+  root.append(createBlockNumObj);
+
+  // Append _this_address
+  Json::Value thisAddressObj;
+  thisAddressObj["vname"] = "_this_address";
+  thisAddressObj["type"] = "ByStr20";
+  thisAddressObj["value"] = "0x" + addr.hex();
+  root.append(thisAddressObj);
+
+  return true;
 }
 
-Address Account::GetAddressFromPublicKey(const PubKey& pubKey)
-{
-    Address address;
+void Account::GetUpdatedStates(std::map<std::string, bytes>& t_states,
+                               std::vector<std::string>& toDeleteIndices,
+                               bool temp) const {
+  ContractStorage2::GetContractStorage().FetchUpdatedStateValuesForAddress(
+      GetAddress(), t_states, toDeleteIndices, temp);
+}
 
-    vector<unsigned char> vec;
-    pubKey.Serialize(vec, 0);
-    SHA2<HASH_TYPE::HASH_VARIANT_256> sha2;
-    sha2.Update(vec);
+void Account::UpdateStates(const Address& addr,
+                           const std::map<std::string, bytes>& t_states,
+                           const std::vector<std::string>& toDeleteIndices,
+                           bool temp, bool revertible) {
+  ContractStorage2::GetContractStorage().UpdateStateDatasAndToDeletes(
+      addr, t_states, toDeleteIndices, m_storageRoot, temp, revertible);
+  if (!m_address) {
+    SetAddress(addr);
+  }
+}
 
-    const vector<unsigned char>& output = sha2.Finalize();
+bool Account::FetchStateJson(Json::Value& root, const string& vname,
+                             const vector<string>& indices, bool temp) const {
+  if (!isContract()) {
+    LOG_GENERAL(WARNING,
+                "Not contract account, why call Account::FetchStateJson!");
+    return false;
+  }
 
-    if (output.size() != 32)
-    {
-        LOG_GENERAL(FATAL,
-                    "assertion failed (" << __FILE__ << ":" << __LINE__ << ": "
-                                         << __FUNCTION__ << ")");
+  if (vname != "_balance") {
+    if (!ContractStorage2::GetContractStorage().FetchStateJsonForContract(
+            root, GetAddress(), vname, indices, temp)) {
+      LOG_GENERAL(WARNING,
+                  "ContractStorage2::FetchStateJsonForContract failed");
+      return false;
     }
+  }
 
-    copy(output.end() - ACC_ADDR_SIZE, output.end(), address.asArray().begin());
+  if ((vname.empty() && indices.empty()) || vname == "_balance") {
+    root["_balance"] = GetBalance().convert_to<string>();
+  }
 
-    return address;
+  if (LOG_SC) {
+    LOG_GENERAL(INFO,
+                "States: " << JSONUtils::GetInstance().convertJsontoStr(root));
+  }
+
+  return true;
+}
+
+Address Account::GetAddressFromPublicKey(const PubKey& pubKey) {
+  Address address;
+
+  bytes vec;
+  pubKey.Serialize(vec, 0);
+  SHA2<HashType::HASH_VARIANT_256> sha2;
+  sha2.Update(vec);
+
+  const bytes& output = sha2.Finalize();
+
+  if (output.size() != 32) {
+    LOG_GENERAL(WARNING, "assertion failed (" << __FILE__ << ":" << __LINE__
+                                              << ": " << __FUNCTION__ << ")");
+  }
+
+  copy(output.end() - ACC_ADDR_SIZE, output.end(), address.asArray().begin());
+
+  return address;
 }
 
 Address Account::GetAddressForContract(const Address& sender,
-                                       const uint256_t& nonce)
-{
-    Address address;
+                                       const uint64_t& nonce) {
+  Address address;
 
-    SHA2<HASH_TYPE::HASH_VARIANT_256> sha2;
-    sha2.Update(sender.asBytes());
-    vector<unsigned char> nonceBytes;
-    SetNumber<uint256_t>(nonceBytes, 0, nonce, UINT256_SIZE);
-    sha2.Update(nonceBytes);
+  SHA2<HashType::HASH_VARIANT_256> sha2;
+  bytes conBytes;
+  copy(sender.asArray().begin(), sender.asArray().end(),
+       back_inserter(conBytes));
+  SetNumber<uint64_t>(conBytes, conBytes.size(), nonce, sizeof(uint64_t));
+  sha2.Update(conBytes);
 
-    const vector<unsigned char>& output = sha2.Finalize();
+  const bytes& output = sha2.Finalize();
 
-    if (output.size() != 32)
-    {
-        LOG_GENERAL(FATAL,
-                    "assertion failed (" << __FILE__ << ":" << __LINE__ << ": "
-                                         << __FUNCTION__ << ")");
-    }
+  if (output.size() != 32) {
+    LOG_GENERAL(WARNING, "assertion failed (" << __FILE__ << ":" << __LINE__
+                                              << ": " << __FUNCTION__ << ")");
+  }
 
-    copy(output.end() - ACC_ADDR_SIZE, output.end(), address.asArray().begin());
+  copy(output.end() - ACC_ADDR_SIZE, output.end(), address.asArray().begin());
 
-    return address;
+  return address;
 }
 
-void Account::SetCode(const std::vector<unsigned char>& code)
-{
-    LOG_MARKER();
+bool Account::SetCode(const bytes& code) {
+  // LOG_MARKER();
 
-    if (code.size() == 0)
-    {
-        return;
-    }
+  if (code.size() == 0) {
+    LOG_GENERAL(WARNING, "Code for this contract is empty");
+    return false;
+  }
 
-    m_codeCache = code;
-    SHA2<HASH_TYPE::HASH_VARIANT_256> sha2;
-    sha2.Update(code);
-    m_codeHash = dev::h256(sha2.Finalize());
-
-    InitStorage();
+  m_codeCache = code;
+  return true;
 }
 
-const h256 Account::GetKeyHash(const string& key) const
-{
-    SHA2<HASH_TYPE::HASH_VARIANT_256> sha2;
-    sha2.Update(DataConversion::StringToCharArray(key));
-    return h256(sha2.Finalize());
+const bytes Account::GetCode() const {
+  if (!isContract()) {
+    return {};
+  }
+
+  if (m_codeCache.empty()) {
+    return ContractStorage2::GetContractStorage().GetContractCode(m_address);
+  }
+  return m_codeCache;
+}
+
+bool Account::GetContractAuxiliaries(bool& is_library, uint32_t& scilla_version,
+                                     std::vector<Address>& extlibs) {
+  if (!isContract()) {
+    return false;
+  }
+
+  if (m_initDataJson == Json::nullValue) {
+    if (!RetrieveContractAuxiliaries()) {
+      LOG_GENERAL(WARNING, "RetrieveContractAuxiliaries failed");
+      return false;
+    }
+  }
+  is_library = m_is_library;
+  scilla_version = m_scilla_version;
+  extlibs = m_extlibs;
+  return true;
+}
+
+bool Account::RetrieveContractAuxiliaries() {
+  if (!isContract()) {
+    LOG_GENERAL(WARNING, "Not a contract");
+    return false;
+  }
+
+  bytes initData = GetInitData();
+  if (!JSONUtils::GetInstance().convertStrtoJson(
+          DataConversion::CharArrayToString(initData), m_initDataJson)) {
+    LOG_GENERAL(WARNING, "Convert InitData to Json failed"
+                             << endl
+                             << DataConversion::CharArrayToString(initData));
+    return false;
+  }
+
+  return ParseInitData(m_initDataJson, m_scilla_version, m_is_library,
+                       m_extlibs);
+}
+
+bool Account::SetInitData(const bytes& initData) {
+  // LOG_MARKER();
+
+  if (initData.size() == 0) {
+    LOG_GENERAL(WARNING, "InitData for this contract is empty");
+    return false;
+  }
+
+  m_initDataCache = initData;
+  return true;
+}
+
+const bytes Account::GetInitData() const {
+  if (!isContract()) {
+    return {};
+  }
+
+  if (m_initDataCache.empty()) {
+    return ContractStorage2::GetContractStorage().GetInitData(m_address);
+  }
+  return m_initDataCache;
+}
+
+bool Account::SetImmutable(const bytes& code, const bytes& initData) {
+  if (!SetCode(code) || !SetInitData(initData)) {
+    return false;
+  }
+
+  SHA2<HashType::HASH_VARIANT_256> sha2;
+  sha2.Update(code);
+  sha2.Update(initData);
+  SetCodeHash(dev::h256(sha2.Finalize()));
+  // LOG_GENERAL(INFO, "m_codeHash: " << m_codeHash);
+  return true;
 }

@@ -1,101 +1,127 @@
 # Zilliqa (codename _Durian_)
 
-[![Build Status](https://travis-ci.org/Zilliqa/Zilliqa.svg?branch=master)](https://travis-ci.org/Zilliqa/Zilliqa) [![codecov](https://codecov.io/gh/Zilliqa/Zilliqa/branch/master/graph/badge.svg)](https://codecov.io/gh/Zilliqa/Zilliqa)
+<p align="center">
+    <img src="https://github.com/Zilliqa/Zilliqa/blob/master/img/zilliqa-logo-color.png" width="200" height="200">
+</p>
+
+<p align="center">
+    <a href="https://travis-ci.com/Zilliqa/Zilliqa" target="_blank"><img src="https://travis-ci.com/Zilliqa/Zilliqa.svg?branch=master" /></a>
+    <a href="https://codecov.io/gh/Zilliqa/Zilliqa" target="_blank"><img src="https://codecov.io/gh/Zilliqa/Zilliqa/branch/master/graph/badge.svg" /></a>
+    <a href="https://github.com/Zilliqa/zilliqa/blob/master/LICENSE" target="_blank"><img src="https://img.shields.io/badge/license-GPL%20v3-green.svg" /></a>
+</p>
 
 ## Overview
-Zilliqa is a new blockchain platform capable of processing thousands of transactions per second with sharding built into it. With sharding, Zilliqa has the potential to match throughput benchmarks set by traditional payment methods (such as _VISA_ and _MasterCard_). More importantly, Zilliqa’s transaction throughput increases (roughly) linearly with its network size.
 
-## Red Prawn Testnet  
-* [Block Explorer](https://explorer.zilliqa.com/home)
-* [Wallet](https://wallet.zilliqa.com/)  
+Zilliqa is a scalable smart contract platform that aims to tackle the congestion issue plaguing the blockchain industry. Zilliqa utilises a unique sharded architecture to achieve parallel processing of transactions while maintaining a large number of public nodes. Hence, Zilliqa is a blockchain capable of reaching high throughput and processing more complex computations while remaining decentralised and secure.
 
-## Available Features
+* If you’re interested in mining Zilliqa, see here: https://github.com/Zilliqa/Zilliqa/wiki/Mining.
+* If you’d like to use the interface with Zilliqa nodes to transfer ZIL and deploy/call smart contracts, see here: https://apidocs.zilliqa.com/.
+* If you’re interested in hacking on the Zilliqa code base, see the [Coding Guidelines](https://github.com/Zilliqa/Zilliqa/wiki/Coding-Guidelines).
+
+> **NOTE**: The `master` branch is not for production as development is currently being worked constantly, please use the `tag` releases if you wish to work on the version of Zilliqa client that is running live on the Zilliqa blockchain. (Current live version `tag` release is `v6.1.2`)
+
+## Zilliqa Mainnet
+
+|          | URL(s) |
+|:---------|:-------|
+| **API URL** | `https://api.zilliqa.com/` |
+| **Block Explorer** | [**Link**](https://viewblock.io/zilliqa) |
+
+## Developer Testnet
+
+|          | URL(s) |
+|:---------|:-------|
+| **API URL** | `https://dev-api.zilliqa.com/` |
+| **Block Explorer** | [**Link**](https://dev-explorer.zilliqa.com) |
+| **Faucet** | [**Link**](https://dev-wallet.zilliqa.com) |
+
+## Available features
+
 The current release has the following features implemented:
-* Proof of Work 1 (PoW1) and 2 (PoW2) for joining the network
+
 * Network sharding
-* Directory Service
-* Consensus for DS block, Sharding structure, Shard Microblock and Final block 
+* Transaction sharding
+* Ethash Proof of Work (PoW) for joining the network
+* GPU (OpenCL and CUDA) for PoW
+* Gas rewards and pricer
+* Coinbase rewards
 * [EC-Schnorr signature](https://en.wikipedia.org/wiki/Schnorr_signature)
-* Data layer and accounts store 
-* Looking up nodes to allow new nodes to join 
-* Persistent storage for transactions
-* [Merkle Patricia tree](https://github.com/ethereum/wiki/wiki/Patricia-Tree)
-* Transaction verification
-* View change
-* Zilliqa Wallet
+* pBFT Consensus mechanism
+* Data layer and accounts store
+* [Smart contract layer](https://scilla.readthedocs.io)
+* State delta forwarding
+* Lookup nodes and Seed nodes for receiving and dispatching transactions
+* Persistent storage for transactions and state
+* S3 storage retrieval from archival nodes
+* View change mechanism
+* Node recovery mechanism
+* Protocol upgrade mechanism
+* Gossip protocol for network message broadcasting
 
 In the coming months, we plan to have the following features:
-* Gossip protocol for network message broadcasting
-* Incentive structure
-* Smart contract design and implementation
-* GPU support for PoW
+
 * Further unit and integration tests
 * Enhancement of existing features
 * More operating system support
-* And much more ...
+* And much more...
 
 ## Minimum system requirements
-To run Zilliqa, we recommend the following minimum system requirements:
-* x64 _Linux_ operating system such as _Ubuntu_
-* Recent dual core processor
-* 2 GB RAM
 
-> Note: Presently we are in active development on Ubuntu 16.04. The support for
-> building on other Ubuntu versions or other OSes is pending.
+To run Zilliqa, we recommend the minimum system requirements specified in our [Mining](https://github.com/Zilliqa/Zilliqa/wiki/Mining#hardware-requirement) page.
 
-## Dependencies
-To compile and run the Zilliqa codebase, you will need the following dependencies to be installed on your machine:  
-* `build-essential`
-* `Boost` 
-* `CMake`
-* `clang-format`
-* `git`
-* `JsonCpp`
-* `json-rpc-cpp`
-* `LevelDB`
-* `OpenSSL`
-* `pkg-config`
-* `libevent`
-* `miniupnpc`
-* Dependencies only required for builds with code coverage enabled
-    * `gcov`
-    * `lcov`
-* Dependency only required for builds on Travis-CI
-    * `curl`
+## Build Dependencies
 
-For Ubuntu 16.04, you can use the following commands (or refer to `./scripts/ci_install_deps.sh`) to install the dependencies:  
+* Ubuntu 16.04:
 
-```bash
-sudo apt-get update
+    ```bash
+    sudo apt-get update
+    sudo apt-get install git libboost-system-dev libboost-filesystem-dev libboost-test-dev \
+        libssl-dev libleveldb-dev libjsoncpp-dev libsnappy-dev cmake libmicrohttpd-dev \
+        libjsonrpccpp-dev build-essential pkg-config libevent-dev libminiupnpc-dev \
+        libcurl4-openssl-dev libboost-program-options-dev libboost-python-dev python3-dev \
+        python3-setuptools python3-pip gawk
+    ```
+
+## Build from Source Code
+
+Build Zilliqa from the source:
+
+```shell
+# download the lastest stable Zilliqa source code
+$ git clone https://github.com/Zilliqa/Zilliqa.git
+$ cd Zilliqa && git checkout tag/v6.1.2
+
+# build Zilliqa binary
+$ ./build.sh
 ```
 
-```bash
-sudo apt-get install git clang-format-5.0 clang-tidy-5.0 clang-5.0 libboost-system-dev libboost-filesystem-dev libboost-test-dev libssl-dev libleveldb-dev libjsoncpp-dev libsnappy-dev cmake libmicrohttpd-dev libjsonrpccpp-dev build-essential pkg-config libevent-dev libminiupnpc-dev
+If you want to build the development branch instead, do:
+
+```shell
+$ git checkout master
 ```
 
-For Mac OS X (experimental), you can use the following command to install the dependencies:  
-```bash
-brew install pkg-config jsoncpp leveldb libjson-rpc-cpp libevent miniupnpc
-```
+## Boot up a local testnet for development
 
-# Running Zilliqa locally (using 10 shard nodes and DS node locally)  
-1. Build Zilliqa from the source.  
-` ./build.sh`
+1. Run the local testnet script in `build` directory:
 
-2. Run the local testnet script in `build` directory
-`cd build && ./tests/Node/test_node_simple.sh`  
+    ```shell
+    $ cd build && ./tests/Node/pre_run.sh && ./tests/Node/test_node_lookup.sh && ./tests/Node/test_node_simple.sh
+    ```
 
-3. Logs of each node can be found at `./local_run`
+2. Logs of each node can be found at `./local_run`.
 
-4. To terminate Zilliqa,   
-`pkill zilliqa` 
+3. To terminate Zilliqa:
 
-## Running a Zilliqa Node on the public testnet 
-Coming soon...
+    ```shell
+    $ pkill zilliqa
+    ```
 
-## For further enquiries
-If you have issues running a node, please feel free to join our [Slack](https://invite.zilliqa.com/) and ask questions. You can also submit your issue at our [Github repository](https://github.com/Zilliqa/zilliqa/issues)
+## Further enquiries
 
-## Licence 
-You can view our [licence here](https://github.com/Zilliqa/zilliqa/blob/master/LICENSE).
-
+|          | Link(s) |
+|:---------|:-------|
+| **Development discussion (discord)** | <a href="https://discord.gg/XMRE9tt" target="_blank"><img src="https://img.shields.io/discord/370992535725932544.svg" /></a> |
+| **Bug report** | <a href="https://github.com/Zilliqa/zilliqa/issues" target="_blank"><img src="https://img.shields.io/github/issues/Zilliqa/zilliqa.svg" /></a> |
+| **Security contact** | `security` :globe_with_meridians: `zilliqa.com` |
+| **Security bug bounty** | https://bugcrowd.com/zilliqa |

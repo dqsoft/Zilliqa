@@ -1,144 +1,232 @@
-/**
-* Copyright (c) 2018 Zilliqa
-* This source code is being disclosed to you solely for the purpose of your participation in
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to
-* the protocols and algorithms that are programmed into, and intended by, the code. You may
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd.,
-* including modifying or publishing the code (or any part of it), and developing or forming
-* another public or private blockchain network. This source code is provided ‘as is’ and no
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed.
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef __ACCOUNTSTORE_H__
-#define __ACCOUNTSTORE_H__
+#ifndef ZILLIQA_SRC_LIBDATA_ACCOUNTDATA_ACCOUNTSTORE_H_
+#define ZILLIQA_SRC_LIBDATA_ACCOUNTDATA_ACCOUNTSTORE_H_
 
 #include <json/json.h>
-#include <mutex>
+#include <map>
 #include <set>
+#include <shared_mutex>
 #include <unordered_map>
 
-#include <boost/multiprecision/cpp_int.hpp>
-
+#include <Schnorr.h>
 #include "Account.h"
+#include "AccountStoreSC.h"
+#include "AccountStoreTrie.h"
 #include "Address.h"
+#include "TransactionReceipt.h"
 #include "common/Constants.h"
-#include "common/Serializable.h"
+#include "common/Singleton.h"
 #include "depends/common/FixedHash.h"
+#include "depends/libDatabase/MemoryDB.h"
 #include "depends/libDatabase/OverlayDB.h"
 #include "depends/libTrie/TrieDB.h"
-#include "libCrypto/Schnorr.h"
 #include "libData/AccountData/Transaction.h"
-
-template<class KeyType, class DB>
-using SecureTrieDB = dev::SpecificTrieDB<dev::GenericTrieDB<DB>, KeyType>;
+#include "libServer/ScillaIPCServer.h"
 
 using StateHash = dev::h256;
 
-/// Maintains the list of accounts.
-class AccountStore : public Serializable
-{
-    std::unordered_map<Address, Account> m_addressToAccount;
+class AccountStore;
 
-    dev::OverlayDB m_db; // Our overlay for the state tree.
-    SecureTrieDB<Address, dev::OverlayDB>
-        m_state; // Our state tree, as an OverlayDB DB.
-    dev::h256 prevRoot;
+class AccountStoreTemp : public AccountStoreSC<std::map<Address, Account>> {
+  AccountStore& m_parent;
 
-    uint64_t m_curBlockNum;
-    Address m_curContractAddr;
+  friend class AccountStore;
 
-    AccountStore();
-    ~AccountStore();
+ public:
+  AccountStoreTemp(AccountStore& parent);
 
-    AccountStore(AccountStore const&) = delete;
-    void operator=(AccountStore const&) = delete;
+  bool DeserializeDelta(const bytes& src, unsigned int offset);
 
-    static bool Compare(const Account& l, const Account& r);
+  /// Returns the Account associated with the specified address.
+  Account* GetAccount(const Address& address) override;
 
-    bool UpdateStateTrie(const Address& address, const Account& account);
+  const std::shared_ptr<std::map<Address, Account>>& GetAddressToAccount() {
+    return this->m_addressToAccount;
+  }
 
-    /// Store the trie root to leveldb
-    void MoveRootToDisk(const dev::h256& root);
-
-    bool ParseCreateContractOutput();
-
-    bool ParseCreateContractJsonOutput(const Json::Value& json);
-
-    bool ParseCallContractOutput();
-
-    bool ParseCallContractJsonOutput(const Json::Value& json);
-
-    Json::Value GetBlockStateJson(const uint64_t& BlockNum) const;
-
-    std::string GetCreateContractCmdStr();
-
-    std::string GetCallContractCmdStr();
-
-    // Generate input for interpreter to check the correctness of contract
-    bool ExportCreateContractFiles(Account* contract);
-
-    bool
-    ExportCallContractFiles(Account* contract,
-                            const std::vector<unsigned char>& contractData);
-
-    const std::vector<unsigned char>
-    CompositeContractData(const std::string& funcName,
-                          const std::string& amount, const Json::Value& params);
-
-public:
-    /// Returns the singleton AccountStore instance.
-    static AccountStore& GetInstance();
-    /// Empty the state trie, must be called explicitly otherwise will retrieve the historical data
-    void Init();
-    /// Implements the Serialize function inherited from Serializable.
-    unsigned int Serialize(std::vector<unsigned char>& dst,
-                           unsigned int offset) const;
-
-    /// Implements the Deserialize function inherited from Serializable.
-    int Deserialize(const std::vector<unsigned char>& src, unsigned int offset);
-
-    /// Verifies existence of Account in the list.
-    bool DoesAccountExist(const Address& address);
-
-    /// Adds an Account to the list.
-    void AddAccount(const Address& address, const Account& account);
-    void AddAccount(const PubKey& pubKey, const Account& account);
-
-    bool UpdateAccounts(const uint64_t& blockNum,
-                        const Transaction& transaction);
-
-    /// Returns the Account associated with the specified address.
-    Account* GetAccount(const Address& address);
-    boost::multiprecision::uint256_t GetNumOfAccounts() const;
-
-    bool IncreaseBalance(const Address& address,
-                         const boost::multiprecision::uint256_t& delta);
-    bool DecreaseBalance(const Address& address,
-                         const boost::multiprecision::uint256_t& delta);
-
-    /// Updates the source and destination accounts included in the specified Transaction.
-    bool TransferBalance(const Address& from, const Address& to,
-                         const boost::multiprecision::uint256_t& delta);
-    boost::multiprecision::uint256_t GetBalance(const Address& address);
-
-    bool IncreaseNonce(const Address& address);
-    boost::multiprecision::uint256_t GetNonce(const Address& address);
-
-    dev::h256 GetStateRootHash() const;
-
-    bool UpdateStateTrieAll();
-    void MoveUpdatesToDisk();
-    void DiscardUnsavedUpdates();
-
-    void PrintAccountState();
-
-    bool RetrieveFromDisk();
-    void RepopulateStateTrie();
+  void AddAccountDuringDeserialization(const Address& address,
+                                       const Account& account) {
+    (*m_addressToAccount)[address] = account;
+  }
 };
 
-#endif // __ACCOUNTSTORE_H__
+// Singleton class for providing interface related Account System
+class AccountStore
+    : public AccountStoreTrie<dev::OverlayDB,
+                              std::unordered_map<Address, Account>>,
+      Singleton<AccountStore> {
+  /// instantiate of AccountStoreTemp, which is serving for the StateDelta
+  /// generation
+  std::unique_ptr<AccountStoreTemp> m_accountStoreTemp;
+
+  /// used for states reverting
+  std::unordered_map<Address, Account> m_addressToAccountRevChanged;
+  std::unordered_map<Address, Account> m_addressToAccountRevCreated;
+
+  /// primary mutex used by account store for protecting permanent states from
+  /// external access
+  mutable std::shared_timed_mutex m_mutexPrimary;
+  /// mutex used when manipulating with state delta
+  std::mutex m_mutexDelta;
+  /// mutex related to revertibles
+  std::mutex m_mutexRevertibles;
+  /// buffer for the raw bytes of state delta serialized
+  bytes m_stateDeltaSerialized;
+
+  std::shared_ptr<ScillaIPCServer> m_scillaIPCServer;
+  std::unique_ptr<jsonrpc::AbstractServerConnector> m_scillaIPCServerConnector;
+
+  AccountStore();
+  ~AccountStore();
+
+  /// Store the trie root to leveldb
+  bool MoveRootToDisk(const dev::h256& root);
+
+ public:
+  /// Returns the singleton AccountStore instance.
+  static AccountStore& GetInstance();
+
+  bool Serialize(bytes& src, unsigned int offset) const override;
+
+  bool Deserialize(const bytes& src, unsigned int offset) override;
+
+  /// generate serialized raw bytes for StateDelta
+  bool SerializeDelta();
+
+  /// get raw bytes of StateDelta
+  void GetSerializedDelta(bytes& dst);
+
+  /// update this account states with the raw bytes of StateDelta
+  bool DeserializeDelta(const bytes& src, unsigned int offset,
+                        bool revertible = false);
+
+  /// update account states in AccountStoreTemp with the raw bytes of StateDelta
+  bool DeserializeDeltaTemp(const bytes& src, unsigned int offset);
+
+  /// empty everything including the persistent storage for account states
+  void Init() override;
+
+  /// make sure it's called only after Init() was called
+  void SetScillaIPCServer(
+      std::shared_ptr<ScillaIPCServer> scillaIPCServer) override;
+
+  /// empty states data in memory
+  void InitSoft();
+
+  /// Reset the reference to underlying leveldb
+  bool RefreshDB();
+
+  /// Use the states in Temp State DB to refresh the state merkle trie
+  bool UpdateStateTrieFromTempStateDB();
+
+  /// commit the in-memory states into persistent storage
+  bool MoveUpdatesToDisk();
+
+  /// discard all the changes in memory and reset the states from last
+  /// checkpoint in persistent storage
+  void DiscardUnsavedUpdates();
+  /// repopulate the in-memory data structures from persistent storage
+  bool RetrieveFromDisk();
+
+  /// Get the instance of an account from AccountStoreTemp
+  /// [[[WARNING]]] Test utility function, don't use in core protocol
+  Account* GetAccountTemp(const Address& address);
+
+  /// update account states in AccountStoreTemp
+  bool UpdateAccountsTemp(const uint64_t& blockNum,
+                          const unsigned int& numShards, const bool& isDS,
+                          const Transaction& transaction,
+                          TransactionReceipt& receipt);
+
+  /// add account in AccountStoreTemp
+  void AddAccountTemp(const Address& address, const Account& account) {
+    std::lock_guard<std::mutex> g(m_mutexDelta);
+    m_accountStoreTemp->AddAccount(address, account);
+  }
+
+  /// increase balance for account in AccountStoreTemp
+  bool IncreaseBalanceTemp(const Address& address, const uint128_t& delta) {
+    std::lock_guard<std::mutex> g(m_mutexDelta);
+    return m_accountStoreTemp->IncreaseBalance(address, delta);
+  }
+
+  /// get the nonce of an account in AccountStoreTemp
+  uint128_t GetNonceTemp(const Address& address);
+
+  /// Update the states balance due to coinbase changes to the AccountStoreTemp
+  bool UpdateCoinbaseTemp(const Address& rewardee,
+                          const Address& genesisAddress,
+                          const uint128_t& amount);
+
+  /// Call ProcessStorageRootUpdateBuffer in AccountStoreTemp
+  void ProcessStorageRootUpdateBufferTemp() {
+    std::lock_guard<std::mutex> g(m_mutexDelta);
+    m_accountStoreTemp->ProcessStorageRootUpdateBuffer();
+  }
+
+  /// Call ProcessStorageRootUpdateBuffer in AccountStoreTemp
+  void CleanStorageRootUpdateBufferTemp() {
+    std::lock_guard<std::mutex> g(m_mutexDelta);
+    m_accountStoreTemp->CleanStorageRootUpdateBuffer();
+  }
+
+  void CleanNewLibrariesCacheTemp() {
+    std::lock_guard<std::mutex> g(m_mutexDelta);
+    m_accountStoreTemp->CleanNewLibrariesCache();
+  }
+
+  /// used in deserialization
+  void AddAccountDuringDeserialization(const Address& address,
+                                       const Account& account,
+                                       const Account& oriAccount,
+                                       const bool fullCopy = false,
+                                       const bool revertible = false) {
+    (*m_addressToAccount)[address] = account;
+
+    if (revertible) {
+      if (fullCopy) {
+        m_addressToAccountRevCreated[address] = account;
+      } else {
+        m_addressToAccountRevChanged[address] = oriAccount;
+      }
+    }
+
+    UpdateStateTrie(address, account);
+  }
+
+  /// return the hash of the raw bytes of StateDelta
+  StateHash GetStateDeltaHash();
+
+  /// commit the StateDelta to update the AccountStore in an irrevertible way
+  void CommitTemp();
+
+  /// clean the AccountStoreTemp and the serialized StateDelta raw bytes
+  void InitTemp();
+
+  /// commit the StateDelta to update the AccountStore in a revertible way
+  void CommitTempRevertible();
+
+  /// revert the AccountStore if previously called CommitTempRevertible
+  void RevertCommitTemp();
+
+  /// clean the data for revert the AccountStore
+  void InitRevertibles();
+};
+
+#endif  // ZILLIQA_SRC_LIBDATA_ACCOUNTDATA_ACCOUNTSTORE_H_

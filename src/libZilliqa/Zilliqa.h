@@ -1,76 +1,73 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef __ZILLIQA_H__
-#define __ZILLIQA_H__
+#ifndef ZILLIQA_SRC_LIBZILLIQA_ZILLIQA_H_
+#define ZILLIQA_SRC_LIBZILLIQA_ZILLIQA_H_
 
-#include <jsonrpccpp/server/connectors/httpserver.h>
 #include <vector>
 
-#include "libConsensus/ConsensusUser.h"
 #include "libDirectoryService/DirectoryService.h"
 #include "libLookup/Lookup.h"
 #include "libMediator/Mediator.h"
 #include "libNetwork/Peer.h"
-#include "libNetwork/PeerManager.h"
-#include "libNetwork/PeerStore.h"
 #include "libNode/Node.h"
-
-#ifdef IS_LOOKUP_NODE
-#include "libServer/Server.h"
-#endif
+#include "libServer/LookupServer.h"
+#include "libServer/StakingServer.h"
+#include "libServer/StatusServer.h"
+#include "libUtils/ThreadPool.h"
 
 /// Main Zilliqa class.
-class Zilliqa
-{
-    PeerManager m_pm;
-    Mediator m_mediator;
-    DirectoryService m_ds;
-    Lookup m_lookup;
-    shared_ptr<ValidatorBase> m_validator;
-    Node m_n;
-    ConsensusUser
-        m_cu; // Note: This is just a test class to demo Consensus usage
+class Zilliqa {
+  Mediator m_mediator;
+  DirectoryService m_ds;
+  Lookup m_lookup;
+  std::shared_ptr<Validator> m_validator;
+  Node m_n;
+  // ConsensusUser m_cu; // Note: This is just a test class to demo Consensus
+  // usage
+  boost::lockfree::queue<std::pair<bytes, Peer>*> m_msgQueue;
 
-#ifdef IS_LOOKUP_NODE
+  std::shared_ptr<LookupServer> m_lookupServer;
+  std::shared_ptr<StakingServer> m_stakingServer;
+  std::unique_ptr<StatusServer> m_statusServer;
+  std::unique_ptr<jsonrpc::AbstractServerConnector> m_lookupServerConnector;
+  std::unique_ptr<jsonrpc::AbstractServerConnector> m_stakingServerConnector;
+  std::unique_ptr<jsonrpc::AbstractServerConnector> m_statusServerConnector;
 
-    jsonrpc::HttpServer m_httpserver;
-    Server m_server;
+  ThreadPool m_queuePool{MAXRECVMESSAGE, "QueuePool"};
 
-#endif //IS_LOOK_UP_NODE
+  void ProcessMessage(std::pair<bytes, Peer>* message);
 
-public:
-    /// Constructor.
-    Zilliqa(const std::pair<PrivKey, PubKey>& key, const Peer& peer,
-            bool loadConfig, unsigned int syncType = SyncType::NO_SYNC,
-            bool toRetrieveHistory = false);
+ public:
+  /// Constructor.
+  Zilliqa(const PairOfKey& key, const Peer& peer,
+          SyncType syncType = SyncType::NO_SYNC,
+          bool toRetrieveHistory = false);
 
-    /// Destructor.
-    ~Zilliqa();
+  /// Destructor.
+  ~Zilliqa();
 
-    void LogSelfNodeInfo(const std::pair<PrivKey, PubKey>& key,
-                         const Peer& peer);
+  void LogSelfNodeInfo(const PairOfKey& key, const Peer& peer);
 
-    /// Forwards an incoming message for processing by the appropriate subclass.
-    void Dispatch(const std::vector<unsigned char>& message, const Peer& from);
+  /// Forwards an incoming message for processing by the appropriate subclass.
+  void Dispatch(std::pair<bytes, Peer>* message);
 
-    /// Returns a list of broadcast peers based on the specified message and instruction types.
-    std::vector<Peer> RetrieveBroadcastList(unsigned char msg_type,
-                                            unsigned char ins_type,
-                                            const Peer& from);
+  static std::string FormatMessageName(unsigned char msgType,
+                                       unsigned char instruction);
 };
 
-#endif // __ZILLIQA_H__
+#endif  // ZILLIQA_SRC_LIBZILLIQA_ZILLIQA_H_

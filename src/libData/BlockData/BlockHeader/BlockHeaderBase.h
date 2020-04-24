@@ -1,41 +1,84 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef __BLOCKHEADERBASE_H__
-#define __BLOCKHEADERBASE_H__
+#ifndef ZILLIQA_SRC_LIBDATA_BLOCKDATA_BLOCKHEADER_BLOCKHEADERBASE_H_
+#define ZILLIQA_SRC_LIBDATA_BLOCKDATA_BLOCKHEADER_BLOCKHEADERBASE_H_
 
 #include <array>
-#include <boost/multiprecision/cpp_int.hpp>
 
-#include "BlockHeaderBase.h"
+#include <Schnorr.h>
 #include "common/Constants.h"
 #include "common/Serializable.h"
-#include "libCrypto/Schnorr.h"
 #include "libData/AccountData/Transaction.h"
 
-/// [TODO] Base class for all supported block header types
-class BlockHeaderBase : public Serializable
-{
-protected:
-    BlockHash m_prevHash; // Hash of the previous block
-    // TODO: pull out all common code from ds, micro and tx block header
+// Hash for the committee that generated the block
+using CommitteeHash = dev::h256;
 
-public:
-    // Constructors
-    BlockHeaderBase();
+const uint64_t INIT_BLOCK_NUMBER = (uint64_t)-1;
+
+/// [TODO] Base class for all supported block header types
+class BlockHeaderBase : public SerializableDataBlock {
+ protected:
+  // TODO: pull out all common code from ds, micro and tx block header
+  uint32_t m_version;
+  CommitteeHash m_committeeHash;
+  BlockHash m_prevHash;
+
+ public:
+  // Constructors
+  BlockHeaderBase();
+  BlockHeaderBase(const uint32_t& version, const CommitteeHash& committeeHash,
+                  const BlockHash& prevHash);
+
+  /// Calculate my hash
+  BlockHash GetMyHash() const;
+
+  /// Returns the current version of this block.
+  const uint32_t& GetVersion() const;
+
+  /// Returns the hash of the committee where the block was generated
+  const CommitteeHash& GetCommitteeHash() const;
+
+  const BlockHash& GetPrevHash() const;
+
+  /// Sets the current version of this block.
+  void SetVersion(const uint32_t& version);
+
+  /// Sets the hash of the committee where the block was generated
+  void SetCommitteeHash(const CommitteeHash& committeeHash);
+
+  /// Sets the hash of the previous block (DirBlock or TxBlock)
+  void SetPrevHash(const BlockHash& prevHash);
+
+  // Operators
+  bool operator==(const BlockHeaderBase& header) const;
+  bool operator<(const BlockHeaderBase& header) const;
+  bool operator>(const BlockHeaderBase& header) const;
+
+  friend std::ostream& operator<<(std::ostream& os, const BlockHeaderBase& t);
 };
 
-#endif // __BLOCKHEADERBASE_H__
+inline std::ostream& operator<<(std::ostream& os, const BlockHeaderBase& t) {
+  os << "<BlockHeaderBase>" << std::endl
+     << " m_version       = " << t.m_version << std::endl
+     << " m_committeeHash = " << t.m_committeeHash << std::endl
+     << " m_prevHash      = " << t.m_prevHash;
+
+  return os;
+}
+
+#endif  // ZILLIQA_SRC_LIBDATA_BLOCKDATA_BLOCKHEADER_BLOCKHEADERBASE_H_

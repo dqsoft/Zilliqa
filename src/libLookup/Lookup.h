@@ -1,21 +1,22 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef __LOOKUP_H__
-#define __LOOKUP_H__
+#ifndef ZILLIQA_SRC_LIBLOOKUP_LOOKUP_H_
+#define ZILLIQA_SRC_LIBLOOKUP_LOOKUP_H_
 
 #include <atomic>
 #include <chrono>
@@ -24,224 +25,441 @@
 #include <map>
 #include <mutex>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
-#include "common/Broadcastable.h"
+#include <Schnorr.h>
 #include "common/Executable.h"
-#include "libCrypto/Schnorr.h"
+#include "libData/AccountData/Transaction.h"
+#include "libData/BlockData/Block/DSBlock.h"
+#include "libData/BlockData/Block/MicroBlock.h"
+#include "libData/BlockData/Block/TxBlock.h"
 #include "libNetwork/Peer.h"
+#include "libNetwork/ShardStruct.h"
+#include "libUtils/IPConverter.h"
 #include "libUtils/Logger.h"
 
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 
 class Mediator;
 class Synchronizer;
+class LookupServer;
+class StakingServer;
+
+// The "first" element in the pair is a map of shard to its transactions
+// The "second" element in the pair counts the total number of transactions in
+// the whole map
+using TxnShardMap = std::map<uint32_t, std::vector<Transaction>>;
+
+// Enum used to tell send type to seed node
+enum SEND_TYPE { ARCHIVAL_SEND_SHARD = 0, ARCHIVAL_SEND_DS };
 
 /// Processes requests pertaining to network, transaction, or block information
-class Lookup : public Executable, public Broadcastable
-{
-    Mediator& m_mediator;
+class Lookup : public Executable {
+  Mediator& m_mediator;
 
-    // Info about lookup node
-    std::vector<Peer> m_lookupNodes;
-    std::vector<Peer> m_lookupNodesOffline;
-    std::vector<Peer> m_seedNodes;
-#ifndef IS_LOOKUP_NODE
-    bool m_dsInfoWaitingNotifying = false;
-    bool m_fetchedDSInfo = false;
-    std::mutex m_mutexDSInfoUpdation;
-    std::condition_variable cv_dsInfoUpdate;
+  // Info about lookup node
+  VectorOfNode m_lookupNodes;
+  VectorOfNode m_lookupNodesOffline;
+  VectorOfNode m_seedNodes;
+  VectorOfNode m_multipliers;
+  std::mutex mutable m_mutexSeedNodes;
+  bool m_dsInfoWaitingNotifying = false;
+  bool m_fetchedDSInfo = false;
 
-    bool CheckStateRoot();
-#endif // IS_LOOKUP_NODE
+  // m_lookupNodes can change during operation if some lookups go offline.
+  // m_lookupNodesStatic is the fixed copy of m_lookupNodes after loading from
+  // constants.xml.
+  VectorOfNode m_lookupNodesStatic;
 
-    // To ensure that the confirm of DS node rejoin won't be later than
-    // It receiving a new DS block
-    bool m_currDSExpired = false;
-    bool m_isFirstLoop = true;
+  // To ensure that the confirm of DS node rejoin won't be later than
+  // It receiving a new DS block
+  bool m_currDSExpired = false;
+  bool m_isFirstLoop = true;
+  // tells if server is running or not
+  bool m_isServer = false;
+  uint8_t m_level = (uint8_t)-1;
 
-#ifdef IS_LOOKUP_NODE
-    // Sharding committee members
-    std::mutex m_mutexShards;
-    std::mutex m_mutexNodesInNetwork;
-    std::vector<std::map<PubKey, Peer>> m_shards;
-    std::vector<Peer> m_nodesInNetwork;
-    std::unordered_set<Peer> l_nodesInNetwork;
+  // Sharding committee members
 
-    std::mutex m_mutexOfflineLookups;
+  std::mutex m_mutexNodesInNetwork;
+  VectorOfPeer m_nodesInNetwork;
+  std::unordered_set<Peer> l_nodesInNetwork;
 
-    // Rsync the lost txBodies from remote lookup nodes if this lookup are doing its recovery
-    Peer GetLookupPeerToRsync();
+  std::atomic<bool> m_startedTxnBatchThread{};
 
-    // Doing Rsync commands
-    bool RsyncTxBodies();
+  std::atomic<bool> m_startedFetchMissingMBsThread{};
 
-    /// Post processing after the DS node successfully synchronized with the network
-    bool FinishRejoinAsLookup();
+  // Start PoW variables
+  std::atomic<bool> m_receivedRaiseStartPoW{};
 
-    // Reset certain variables to the initial state
-    bool CleanVariables();
+  // Store the StateRootHash of latest txBlock before States are repopulated.
+  StateHash m_prevStateRootHashTemp;
 
-    // To block certain types of incoming message for certain states
-    bool ToBlockMessage(unsigned char ins_byte);
-#endif // IS_LOOKUP_NODE
-    std::mutex m_mutexSetDSBlockFromSeed;
-    std::mutex m_mutexSetTxBlockFromSeed;
-    std::mutex m_mutexSetTxBodyFromSeed;
-    std::mutex m_mutexSetState;
+  /// To indicate which type of synchronization is using
+  std::atomic<SyncType> m_syncType{};  // = SyncType::NO_SYNC;
 
-    std::vector<unsigned char> ComposeGetDSInfoMessage();
-    std::vector<unsigned char> ComposeGetStateMessage();
+  void SetAboveLayer();
 
-    std::vector<unsigned char>
-    ComposeGetDSBlockMessage(boost::multiprecision::uint256_t lowBlockNum,
-                             boost::multiprecision::uint256_t highBlockNum);
-    std::vector<unsigned char>
-    ComposeGetTxBlockMessage(boost::multiprecision::uint256_t lowBlockNum,
-                             boost::multiprecision::uint256_t highBlockNum);
+  /// Post processing after the lookup node successfully synchronized with the
+  /// network
+  bool FinishRejoinAsLookup();
 
-    std::vector<unsigned char> ComposeGetLookupOfflineMessage();
-    std::vector<unsigned char> ComposeGetLookupOnlineMessage();
+  // To block certain types of incoming message for certain states
+  bool ToBlockMessage(unsigned char ins_byte);
 
-    std::vector<unsigned char> ComposeGetOfflineLookupNodes();
+  /// Initialize all blockchains and blocklinkchain
+  void InitAsNewJoiner();
 
-    // Append time stamp to the message to avoid discarding due to same message hash
-    void AppendTimestamp(std::vector<unsigned char>& message,
-                         unsigned int& offset);
+  std::mutex m_mutexSetDSBlockFromSeed;
+  std::mutex m_mutexSetTxBlockFromSeed;
+  std::mutex m_mutexSetTxBodyFromSeed;
+  std::mutex m_mutexSetState;
+  std::mutex mutable m_mutexLookupNodes;
+  std::mutex m_mutexCheckDirBlocks;
+  std::mutex m_mutexMicroBlocksBuffer;
 
-public:
-    /// Constructor.
-    Lookup(Mediator& mediator);
+  TxnShardMap m_txnShardMap;
 
-    /// Destructor.
-    ~Lookup();
+  // Get StateDeltas from seed
+  std::mutex m_mutexSetStateDeltasFromSeed;
+  std::condition_variable cv_setStateDeltasFromSeed;
 
-    // Setting the lookup nodes
-    // Hardcoded for now -- to be called by constructor
-    void SetLookupNodes();
+  // TxBlockBuffer
+  std::vector<TxBlock> m_txBlockBuffer;
 
-    // Getter for m_lookupNodes
-    std::vector<Peer> GetLookupNodes();
+  std::shared_ptr<LookupServer> m_lookupServer;
+  std::shared_ptr<StakingServer> m_stakingServer;
 
-    // Calls P2PComm::SendBroadcastMessage to Lookup Nodes
-    void
-    SendMessageToLookupNodes(const std::vector<unsigned char>& message) const;
+  bytes ComposeGetDSInfoMessage(bool initialDS = false);
+  bytes ComposeGetStateMessage();
 
-    // Calls P2PComm::SendMessage serially to every Lookup Nodes
-    void SendMessageToLookupNodesSerial(
-        const std::vector<unsigned char>& message) const;
+  bytes ComposeGetDSBlockMessage(uint64_t lowBlockNum, uint64_t highBlockNum,
+                                 const bool includeMinerInfo = false);
+  bytes ComposeGetTxBlockMessage(uint64_t lowBlockNum, uint64_t highBlockNum);
+  bytes ComposeGetStateDeltaMessage(uint64_t blockNum);
+  bytes ComposeGetStateDeltasMessage(uint64_t lowBlockNum,
+                                     uint64_t highBlockNum);
 
-    // Calls P2PComm::SendMessage to one of the last x Lookup Nodes randomly
-    void SendMessageToRandomLookupNode(
-        const std::vector<unsigned char>& message) const;
+  bytes ComposeGetLookupOfflineMessage();
+  bytes ComposeGetLookupOnlineMessage();
 
-    // Calls P2PComm::SendMessage serially for every Seed peer
-    void
-    SendMessageToSeedNodes(const std::vector<unsigned char>& message) const;
+  bytes ComposeGetOfflineLookupNodes();
 
-    // TODO: move the Get and ProcessSet functions to Synchronizer
-    bool GetSeedPeersFromLookup();
-    bool GetDSInfoFromSeedNodes();
-    bool GetDSBlockFromSeedNodes(boost::multiprecision::uint256_t lowBlockNum,
-                                 boost::multiprecision::uint256_t highBlockNum);
-    bool GetTxBlockFromSeedNodes(boost::multiprecision::uint256_t lowBlockNum,
-                                 boost::multiprecision::uint256_t highBlockNum);
-    bool GetDSInfoFromLookupNodes();
-    bool
-    GetDSBlockFromLookupNodes(boost::multiprecision::uint256_t lowBlockNum,
-                              boost::multiprecision::uint256_t highBlockNum);
-    bool
-    GetTxBlockFromLookupNodes(boost::multiprecision::uint256_t lowBlockNum,
-                              boost::multiprecision::uint256_t highBlockNum);
-    bool GetTxBodyFromSeedNodes(std::string txHashStr);
-    bool GetStateFromLookupNodes();
+  void RetrieveDSBlocks(std::vector<DSBlock>& dsBlocks, uint64_t& lowBlockNum,
+                        uint64_t& highBlockNum, bool partialRetrieve = false);
+  void RetrieveTxBlocks(std::vector<TxBlock>& txBlocks, uint64_t& lowBlockNum,
+                        uint64_t& highBlockNum);
 
-    // Get the offline lookup nodes from lookup nodes
-    bool GetOfflineLookupNodes();
-#ifdef IS_LOOKUP_NODE
-    bool SetDSCommitteInfo();
+ public:
+  /// Constructor.
+  Lookup(Mediator& mediator, SyncType syncType);
 
-    std::vector<std::map<PubKey, Peer>> GetShardPeers();
-    std::vector<Peer> GetNodePeers();
+  /// Destructor.
+  ~Lookup();
 
-    // Start synchronization with other lookup nodes as a lookup node
-    void StartSynchronization();
+  /// Sync new lookup node.
+  void InitSync();
 
-    // Set my lookup ip offline in other lookup nodes
-    bool GetMyLookupOffline();
+  // Setting the lookup nodes
+  // Hardcoded for now -- to be called by constructor
+  void SetLookupNodes();
 
-    // Set my lookup ip online in other lookup nodes
-    bool GetMyLookupOnline();
+  void SetLookupNodes(const VectorOfNode&);
 
-    // Rejoin the network as a lookup node in case of failure happens in protocol
-    void RejoinAsLookup();
-#endif // IS_LOOKUP_NODE
+  bool CheckStateRoot();
 
-    bool
-    ProcessEntireShardingStructure(const std::vector<unsigned char>& message,
-                                   unsigned int offset, const Peer& from);
-    bool
-    ProcessGetSeedPeersFromLookup(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
-    bool ProcessGetDSInfoFromSeed(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
-    bool ProcessGetDSBlockFromSeed(const std::vector<unsigned char>& message,
-                                   unsigned int offset, const Peer& from);
-    bool ProcessGetTxBlockFromSeed(const std::vector<unsigned char>& message,
-                                   unsigned int offset, const Peer& from);
-    bool ProcessGetTxBodyFromSeed(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
-    bool ProcessGetStateFromSeed(const std::vector<unsigned char>& message,
-                                 unsigned int offset, const Peer& from);
+  // Getter for m_lookupNodes
+  VectorOfNode GetLookupNodes() const;
 
-    bool ProcessGetNetworkId(const std::vector<unsigned char>& message,
-                             unsigned int offset, const Peer& from);
+  // Getter for m_lookupNodesStatic
+  VectorOfNode GetLookupNodesStatic() const;
 
-    bool ProcessGetOfflineLookups(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
+  // Getter for m_seedNodes
+  VectorOfNode GetSeedNodes() const;
 
-    bool
-    ProcessSetSeedPeersFromLookup(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
-    bool ProcessSetDSInfoFromSeed(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
-    bool ProcessSetDSBlockFromSeed(const std::vector<unsigned char>& message,
-                                   unsigned int offset, const Peer& from);
-    bool ProcessSetTxBlockFromSeed(const std::vector<unsigned char>& message,
-                                   unsigned int offset, const Peer& from);
-    bool ProcessSetTxBodyFromSeed(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
-    bool ProcessSetStateFromSeed(const std::vector<unsigned char>& message,
-                                 unsigned int offset, const Peer& from);
+  std::mutex m_txnShardMapMutex;
 
-    bool ProcessSetLookupOffline(const std::vector<unsigned char>& message,
-                                 unsigned int offset, const Peer& from);
-    bool ProcessSetLookupOnline(const std::vector<unsigned char>& message,
-                                unsigned int offset, const Peer& from);
+  const std::vector<Transaction>& GetTxnFromShardMap(
+      uint32_t index);  // Use m_txnShardMapMutex with this function
 
-    bool ProcessSetOfflineLookups(const std::vector<unsigned char>& message,
-                                  unsigned int offset, const Peer& from);
+  std::mutex m_mutexShardStruct;
+  std::condition_variable cv_shardStruct;
 
-    bool Execute(const std::vector<unsigned char>& message, unsigned int offset,
-                 const Peer& from);
-#ifndef IS_LOOKUP_NODE
-    bool m_fetchedOfflineLookups = false;
-    std::mutex m_mutexOfflineLookupsUpdation;
-    std::condition_variable cv_offlineLookups;
+  void ComposeAndSendGetShardingStructureFromSeed();
 
-    bool InitMining();
-#endif // IS_LOOKUP_NODE
+  bool IsLookupNode(const PubKey& pubKey) const;
 
-    /// To indicate which type of synchronization is using
-    unsigned int m_syncType = SyncType::NO_SYNC;
+  bool IsLookupNode(const Peer& peerInfo) const;
 
-    /// Helper variables used by new node synchronization
-    bool m_startedPoW2 = false;
+  // Gen n valid txns
+  bool GenTxnToSend(size_t num_txn,
+                    std::map<uint32_t, std::vector<Transaction>>& mp,
+                    uint32_t numShards);
+  bool GenTxnToSend(size_t num_txn, std::vector<Transaction>& shardTxn,
+                    std::vector<Transaction>& DSTxn);
 
-    bool AlreadyJoinedNetwork();
+  // Try resolving ip from the given peer's DNS
+  uint128_t TryGettingResolvedIP(const Peer& peer) const;
+
+  // Calls P2PComm::SendBroadcastMessage to Lookup Nodes
+  void SendMessageToLookupNodes(const bytes& message) const;
+
+  // Calls P2PComm::SendMessage serially to every Lookup Nodes
+  void SendMessageToLookupNodesSerial(const bytes& message) const;
+
+  // Calls P2PComm::SendMessage to one of the last x Lookup Nodes randomly
+  void SendMessageToRandomLookupNode(const bytes& message) const;
+
+  // Calls P2PComm::SendMessage serially for every Seed peer
+  void SendMessageToSeedNodes(const bytes& message) const;
+
+  void SendMessageToRandomSeedNode(const bytes& message) const;
+
+  void RectifyTxnShardMap(const uint32_t, const uint32_t);
+
+  // TODO: move the Get and ProcessSet functions to Synchronizer
+  bool GetDSInfoFromSeedNodes();
+  bool GetDSInfoLoop();
+  bool GetDSInfoFromLookupNodes(bool initialDS = false);
+  bool GetDSBlockFromLookupNodes(uint64_t lowBlockNum, uint64_t highBlockNum,
+                                 const bool includeMinerInfo = false);
+  bool GetTxBlockFromLookupNodes(uint64_t lowBlockNum, uint64_t highBlockNum);
+  bool GetTxBlockFromSeedNodes(uint64_t lowBlockNum, uint64_t highBlockNum);
+  bool GetStateDeltaFromSeedNodes(const uint64_t& blockNum);
+  bool GetStateDeltasFromSeedNodes(uint64_t lowBlockNum, uint64_t highBlockNum);
+
+  bool GetStateFromSeedNodes();
+  // UNUSED
+  bool ProcessGetShardFromSeed([[gnu::unused]] const bytes& message,
+                               [[gnu::unused]] unsigned int offset,
+                               [[gnu::unused]] const Peer& from);
+  // UNUSED
+  bool ProcessSetShardFromSeed([[gnu::unused]] const bytes& message,
+                               [[gnu::unused]] unsigned int offset,
+                               [[gnu::unused]] const Peer& from);
+  bool GetDSBlockFromSeedNodes(uint64_t lowBlockNum, uint64_t highblocknum,
+                               const bool includeMinerInfo = false);
+
+  // Get the offline lookup nodes from lookup nodes
+  bool GetOfflineLookupNodes();
+
+  bool SetDSCommitteInfo(bool replaceMyPeerWithDefault = false);
+
+  DequeOfShard GetShardPeers();
+  VectorOfPeer GetNodePeers();
+
+  // Start synchronization with other lookup nodes as a lookup node
+  void StartSynchronization();
+
+  // Set my lookup ip offline in other lookup nodes
+  bool GetMyLookupOffline();
+
+  // Set my lookup ip online in other lookup nodes
+  bool GetMyLookupOnline(bool fromRecovery = false);
+
+  // Rejoin the network as a lookup node in case of failure happens in protocol
+  void RejoinAsLookup();
+
+  // Rejoin the network as a newlookup node in case of failure happens in
+  // protocol
+  void RejoinAsNewLookup(bool fromLookup = true);
+
+  bool AddToTxnShardMap(const Transaction& tx, uint32_t shardId);
+  static bool AddToTxnShardMap(const Transaction& tx, uint32_t shardId,
+                               TxnShardMap& txnShardMap,
+                               std::mutex& txnShardMapMutex);
+
+  void CheckBufferTxBlocks();
+
+  bool DeleteTxnShardMap(uint32_t shardId);
+
+  void SetServerTrue();
+
+  bool GetIsServer();
+
+  void SenderTxnBatchThread(const uint32_t);
+
+  void SendTxnPacketToNodes(const uint32_t, const uint32_t);
+  bool ProcessEntireShardingStructure();
+  bool ProcessGetDSInfoFromSeed(const bytes& message, unsigned int offset,
+                                const Peer& from);
+  bool ProcessGetDSBlockFromSeed(const bytes& message, unsigned int offset,
+                                 const Peer& from);
+  bool ProcessGetTxBlockFromSeed(const bytes& message, unsigned int offset,
+                                 const Peer& from);
+  bool ProcessGetStateDeltaFromSeed(const bytes& message, unsigned int offset,
+                                    const Peer& from);
+  bool ProcessGetStateDeltasFromSeed(const bytes& message, unsigned int offset,
+                                     const Peer& from);
+  bool ProcessGetStateFromSeed(const bytes& message, unsigned int offset,
+                               const Peer& from);
+
+  bool ProcessGetTxnsFromLookup([[gnu::unused]] const bytes& message,
+                                [[gnu::unused]] unsigned int offset,
+                                [[gnu::unused]] const Peer& from);
+
+  bool ProcessSetTxnsFromLookup([[gnu::unused]] const bytes& message,
+                                [[gnu::unused]] unsigned int offset,
+                                [[gnu::unused]] const Peer& from);
+
+  void SendGetTxnFromLookup(const BlockHash& mbHash,
+                            const std::vector<TxnHash>& txnhashes);
+
+  void SendGetMicroBlockFromLookup(const std::vector<BlockHash>& mbHashes);
+
+  bool ProcessGetMicroBlockFromLookup([[gnu::unused]] const bytes& message,
+                                      [[gnu::unused]] unsigned int offset,
+                                      [[gnu::unused]] const Peer& from);
+
+  bool ProcessSetMicroBlockFromLookup([[gnu::unused]] const bytes& message,
+                                      [[gnu::unused]] unsigned int offset,
+                                      [[gnu::unused]] const Peer& from);
+
+  bool AddMicroBlockToStorage(const MicroBlock& microblock);
+
+  bool ProcessGetOfflineLookups(const bytes& message, unsigned int offset,
+                                const Peer& from);
+
+  bool ProcessSetDSInfoFromSeed(const bytes& message, unsigned int offset,
+                                const Peer& from);
+  bool ProcessSetDSBlockFromSeed(const bytes& message, unsigned int offset,
+                                 const Peer& from);
+  bool ProcessSetMinerInfoFromSeed(const bytes& message, unsigned int offset,
+                                   const Peer& from);
+  bool ProcessSetTxBlockFromSeed(const bytes& message, unsigned int offset,
+                                 const Peer& from);
+  void CommitTxBlocks(const std::vector<TxBlock>& txBlocks);
+  void PrepareForStartPow();
+  bool GetDSInfo();
+  bool ProcessSetStateDeltaFromSeed(const bytes& message, unsigned int offset,
+                                    const Peer& from);
+  bool ProcessSetStateDeltasFromSeed(const bytes& message, unsigned int offset,
+                                     const Peer& from);
+  bool ProcessSetStateFromSeed(const bytes& message, unsigned int offset,
+                               const Peer& from);
+
+  bool ProcessSetLookupOffline(const bytes& message, unsigned int offset,
+                               const Peer& from);
+  bool ProcessSetLookupOnline(const bytes& message, unsigned int offset,
+                              const Peer& from);
+
+  bool ProcessSetOfflineLookups(const bytes& message, unsigned int offset,
+                                const Peer& from);
+
+  bool ProcessRaiseStartPoW(const bytes& message, unsigned int offset,
+                            const Peer& from);
+  bool ProcessGetStartPoWFromSeed(const bytes& message, unsigned int offset,
+                                  const Peer& from);
+  bool ProcessSetStartPoWFromSeed(const bytes& message, unsigned int offset,
+                                  const Peer& from);
+
+  bool ProcessGetDirectoryBlocksFromSeed(const bytes& message,
+                                         unsigned int offset, const Peer& from);
+
+  bool ProcessSetDirectoryBlocksFromSeed(const bytes& message,
+                                         unsigned int offset, const Peer& from);
+
+  bool ProcessVCGetLatestDSTxBlockFromSeed(const bytes& message,
+                                           unsigned int offset,
+                                           const Peer& from);
+  bool ProcessForwardTxn(const bytes& message, unsigned int offset,
+                         const Peer& from);
+
+  bool ProcessGetDSGuardNetworkInfo(const bytes& message, unsigned int offset,
+                                    const Peer& from);
+
+  bool ProcessSetHistoricalDB(const bytes& message, unsigned int offset,
+                              const Peer& from);
+
+  bool ProcessGetCosigsRewardsFromSeed(const bytes& message,
+                                       unsigned int offset, const Peer& from);
+
+  void ComposeAndSendGetDirectoryBlocksFromSeed(
+      const uint64_t& index_num, bool toSendSeed = true,
+      const bool includeMinerInfo = false);
+
+  void ComposeAndSendGetCosigsRewardsFromSeed(const uint64_t& block_num);
+
+  static bool VerifySenderNode(const VectorOfNode& vecNodes,
+                               const PubKey& pubKeyToVerify);
+
+  static bool VerifySenderNode(const VectorOfNode& vecNodes,
+                               const uint128_t& ipToVerify);
+
+  static bool VerifySenderNode(const DequeOfNode& deqNodes,
+                               const PubKey& pubKeyToVerify);
+
+  static bool VerifySenderNode(const DequeOfNode& deqNodes,
+                               const uint128_t& ipToVerify);
+
+  static bool VerifySenderNode(const Shard& shard,
+                               const PubKey& pubKeyToVerify);
+
+  /// Check and fetch unavailable microblocks
+  void CheckAndFetchUnavailableMBs(bool skipLatestTxBlk = true);
+
+  /// Find any unavailable mbs from last N txblks and add to
+  /// m_unavailableMicroBlocks
+  void FindMissingMBsForLastNTxBlks(const uint32_t& num);
+
+  bool Execute(const bytes& message, unsigned int offset, const Peer& from);
+
+  inline SyncType GetSyncType() const { return m_syncType.load(); }
+  void SetSyncType(SyncType syncType);
+
+  // Reset certain variables to the initial state
+  bool CleanVariables();
+
+  void SetLookupServer(std::shared_ptr<LookupServer> lookupServer) {
+    m_lookupServer = std::move(lookupServer);
+  }
+
+  void SetStakingServer(std::shared_ptr<StakingServer> stakingServer) {
+    m_stakingServer = std::move(stakingServer);
+  }
+
+  bool m_fetchedOfflineLookups = false;
+  std::mutex m_mutexOfflineLookupsUpdation;
+  std::condition_variable cv_offlineLookups;
+
+  bool m_historicalDB = false;
+
+  bool m_fetchedLatestDSBlock = false;
+  std::mutex m_mutexLatestDSBlockUpdation;
+  std::condition_variable cv_latestDSBlock;
+
+  std::mutex m_MutexCVSetTxBlockFromSeed;
+  std::condition_variable cv_setTxBlockFromSeed;
+  std::condition_variable cv_setStateDeltaFromSeed;
+  std::mutex m_mutexSetStateDeltaFromSeed;
+  bool m_skipAddStateDeltaToAccountStore = false;
+
+  std::mutex m_mutexCVJoined;
+  std::condition_variable cv_waitJoined;
+
+  bool InitMining(uint32_t lookupIndex);
+
+  /// Helper variables used by new node synchronization
+  bool m_startedPoW = false;
+
+  bool AlreadyJoinedNetwork();
+
+  void RemoveSeedNodesFromBlackList();
+
+  std::mutex m_mutexDSInfoUpdation;
+  std::condition_variable cv_dsInfoUpdate;
+
+  // Start PoW variables
+  std::set<Peer> m_getStartPoWPeerSet;
+  std::mutex m_mutexGetStartPoWPeerSet;
+
+  // For use by lookup for dispatching transactions
+  std::atomic<bool> m_sendSCCallsToDS{};
 };
 
-#endif // __LOOKUP_H__
+#endif  // ZILLIQA_SRC_LIBLOOKUP_LOOKUP_H_

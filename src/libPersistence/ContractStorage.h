@@ -1,60 +1,159 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef CONTRACTSTORAGE_H
-#define CONTRACTSTORAGE_H
+#ifndef ZILLIQA_SRC_LIBPERSISTENCE_CONTRACTSTORAGE_H_
+#define ZILLIQA_SRC_LIBPERSISTENCE_CONTRACTSTORAGE_H_
 
+#include <json/json.h>
 #include <leveldb/db.h>
+#include <shared_mutex>
 
+#include "common/Constants.h"
+#include "common/Singleton.h"
 #include "depends/libDatabase/LevelDB.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include "depends/libDatabase/OverlayDB.h"
+#pragma GCC diagnostic pop
+
 #include "depends/libTrie/TrieDB.h"
 
-using namespace dev;
+namespace Contract {
 
-class ContractStorage
-{
-    OverlayDB m_stateDB;
-    LevelDB m_codeDB;
+Index GetIndex(const dev::h160& address, const std::string& key);
 
-    ContractStorage()
-        : m_stateDB("contractState")
-        , m_codeDB("contractCode"){};
+class ContractStorage : public Singleton<ContractStorage> {
+  LevelDB m_codeDB;
+  LevelDB m_stateIndexDB;
+  LevelDB m_stateDataDB;
 
-    ContractStorage(ContractStorage const&) = delete;
-    void operator=(ContractStorage const&) = delete;
+  // Used by AccountStore
+  std::unordered_map<std::string, bytes> m_stateIndexMap;
+  std::unordered_map<std::string, bytes> m_stateDataMap;
 
-    ~ContractStorage() = default;
+  // Used by AccountStoreTemp for StateDelta
+  std::unordered_map<std::string, bytes> t_stateIndexMap;
+  std::unordered_map<std::string, bytes> t_stateDataMap;
 
-public:
-    /// Returns the singleton ContractStorage instance.
-    static ContractStorage& GetContractStorage()
-    {
-        static ContractStorage cs;
-        return cs;
-    }
+  // Used for RevertCommitTemp
+  std::unordered_map<std::string, bytes> r_stateIndexMap;
+  std::unordered_map<std::string, bytes> r_stateDataMap;
 
-    OverlayDB& GetStateDB() { return m_stateDB; }
+  // Used for revert state due to failure in chain call
+  std::unordered_map<std::string, bytes> p_stateIndexMap;
+  std::unordered_map<std::string, bytes> p_stateDataMap;
 
-    /// Adds a contract code to persistence
-    bool PutContractCode(const h160& address,
-                         const std::vector<unsigned char>& code);
+  mutable std::shared_timed_mutex m_codeMutex;
+  mutable std::shared_timed_mutex m_stateMainMutex;
+  mutable std::shared_timed_mutex m_stateIndexMutex;
+  mutable std::shared_timed_mutex m_stateDataMutex;
 
-    /// Get the desired code from persistence
-    const std::vector<unsigned char> GetContractCode(const h160& address);
+  /// Set the indexes of all the states of an contract account
+  bool SetContractStateIndexes(const dev::h160& address,
+                               const std::vector<Index>& indexes, bool temp,
+                               bool revertible);
+
+  /// Get the raw rlp string of the states of an account
+  std::vector<bytes> GetContractStatesData(const dev::h160& address, bool temp);
+
+  ContractStorage()
+      : m_codeDB("contractCode_deprecated"),
+        m_stateIndexDB("contractStateIndex"),
+        m_stateDataDB("contractStateData"){};
+
+  ~ContractStorage() = default;
+
+  Index GetNewIndex(const dev::h160& address, const std::string& key,
+                    const std::vector<Index>& existing_indexes);
+
+  bool CheckIndexExists(const Index& index);
+
+ public:
+  /// Returns the singleton ContractStorage instance.
+  static ContractStorage& GetContractStorage() {
+    static ContractStorage cs;
+    return cs;
+  }
+
+  /// Adds a contract code to persistence
+  bool PutContractCode(const dev::h160& address, const bytes& code);
+
+  /// Adds contract codes to persistence in batch
+  bool PutContractCodeBatch(
+      const std::unordered_map<std::string, std::string>& batch);
+
+  /// Get the desired code from persistence
+  const bytes GetContractCode(const dev::h160& address);
+
+  /// Delete the contract code in persistence
+  bool DeleteContractCode(const dev::h160& address);
+
+  /// Get the indexes of all the states of an contract account
+  std::vector<Index> GetContractStateIndexes(const dev::h160& address,
+                                             bool temp);
+
+  /// Get the raw protobuf string of the state by a index
+  std::string GetContractStateData(const Index& index, bool temp);
+
+  /// Put one's contract states in database
+  bool PutContractState(const dev::h160& address,
+                        const std::vector<StateEntry>& states,
+                        dev::h256& stateHash, bool temp);
+
+  bool PutContractState(const dev::h160& address,
+                        const std::vector<std::pair<Index, bytes>>& entries,
+                        dev::h256& stateHash, bool temp, bool revertible,
+                        const std::vector<Index>& existing_indexes = {},
+                        bool provideExisting = false);
+
+  /// Buffer the current t_map into p_map
+  void BufferCurrentState();
+
+  /// Revert the t_map from the p_map just buffered
+  void RevertPrevState();
+
+  /// Put the in-memory m_map into database
+  bool CommitStateDB();
+
+  /// Clean t_maps
+  void InitTempState();
+
+  /// Get the json formatted data of the states for a contract account
+  bool GetContractStateJson(const dev::h160& address,
+                            std::pair<Json::Value, Json::Value>& roots,
+                            uint32_t& scilla_version, bool temp);
+
+  /// Get the state hash of a contract account
+  dev::h256 GetContractStateHash(const dev::h160& address, bool temp);
+
+  /// Clean the databases
+  void Reset();
+
+  /// Revert m_map with r_map
+  void RevertContractStates();
+
+  /// Clean r_map
+  void InitRevertibles();
+
+  /// Refresh all DB
+  bool RefreshAll();
 };
 
-#endif // CONTRACTSTORAGE_H
+}  // namespace Contract
+
+#endif  // ZILLIQA_SRC_LIBPERSISTENCE_CONTRACTSTORAGE_H_

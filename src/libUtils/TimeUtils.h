@@ -1,28 +1,35 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#ifndef __TIMEUTILS_H__
-#define __TIMEUTILS_H__
+#ifndef ZILLIQA_SRC_LIBUTILS_TIMEUTILS_H_
+#define ZILLIQA_SRC_LIBUTILS_TIMEUTILS_H_
 
-#include <boost/multiprecision/cpp_int.hpp>
 #include <chrono>
+#include <string>
 
 std::chrono::system_clock::time_point r_timer_start();
 double r_timer_end(std::chrono::system_clock::time_point start_time);
 
-boost::multiprecision::uint256_t get_time_as_int();
+uint64_t get_time_as_int();
+struct tm* gmtime_safe(const time_t* timer);
+long int get_ms(const std::chrono::time_point<std::chrono::system_clock> time);
 
-#endif // __TIMEUTILS_H__
+std::string microsec_timestamp_to_readable(const uint64_t& timestamp);
+
+bool is_timestamp_in_range(const uint64_t& timestamp, const uint64_t& loBound,
+                           const uint64_t& hiBound);
+#endif  // ZILLIQA_SRC_LIBUTILS_TIMEUTILS_H_

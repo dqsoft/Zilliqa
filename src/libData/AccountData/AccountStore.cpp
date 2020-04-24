@@ -1,999 +1,485 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
-#include <boost/filesystem.hpp>
 #include <leveldb/db.h>
 
 #include "AccountStore.h"
-#include "Address.h"
-#include "depends/common/RLP.h"
+#include "libCrypto/Sha2.h"
+#include "libMessage/Messenger.h"
 #include "libPersistence/BlockStorage.h"
 #include "libPersistence/ContractStorage.h"
-#include "libUtils/DataConversion.h"
-#include "libUtils/Logger.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#include "libPersistence/ScillaMessage.pb.h"
+#pragma GCC diagnostic pop
+#include "libServer/ScillaIPCServer.h"
 #include "libUtils/SysCommand.h"
 
 using namespace std;
+using namespace dev;
 using namespace boost::multiprecision;
+using namespace Contract;
 
-AccountStore::AccountStore()
-    : m_db("state")
-{
-    m_state = SecureTrieDB<Address, dev::OverlayDB>(&m_db);
-}
+AccountStore::AccountStore() {
+  m_accountStoreTemp = make_unique<AccountStoreTemp>(*this);
 
-AccountStore::~AccountStore()
-{
-    // boost::filesystem::remove_all("./state");
-}
-
-void AccountStore::Init()
-{
-    LOG_MARKER();
-    m_addressToAccount.clear();
-    ContractStorage::GetContractStorage().GetStateDB().ResetDB();
-    m_db.ResetDB();
-    m_state.init();
-    prevRoot = m_state.root();
-}
-
-unsigned int AccountStore::Serialize(vector<unsigned char>& dst,
-                                     unsigned int offset) const
-{
-    // [Total number of accounts (uint256_t)] [Addr 1] [Account 1] [Addr 2] [Account 2] .... [Addr n] [Account n]
-
-    // LOG_MARKER();
-
-    unsigned int size_needed = UINT256_SIZE;
-    unsigned int size_remaining = dst.size() - offset;
-    unsigned int totalSerializedSize = size_needed;
-
-    if (size_remaining < size_needed)
-    {
-        dst.resize(size_needed + offset);
+  /// Scilla IPC Server
+  if (ENABLE_SC) {
+    /// remove previous file path
+    boost::filesystem::remove_all(SCILLA_IPC_SOCKET_PATH);
+    m_scillaIPCServerConnector =
+        make_unique<jsonrpc::UnixDomainSocketServer>(SCILLA_IPC_SOCKET_PATH);
+    m_scillaIPCServer =
+        make_shared<ScillaIPCServer>(*m_scillaIPCServerConnector);
+    if (m_scillaIPCServer == nullptr) {
+      LOG_GENERAL(WARNING, "m_scillaIPCServer NULL");
+    } else {
+      SetScillaIPCServer(m_scillaIPCServer);
+      if (m_scillaIPCServer->StartListening()) {
+        LOG_GENERAL(INFO, "Scilla IPC Server started successfully");
+      } else {
+        LOG_GENERAL(WARNING, "Scilla IPC Server couldn't start")
+      }
     }
-
-    unsigned int curOffset = offset;
-
-    // [Total number of accounts]
-    LOG_GENERAL(
-        INFO,
-        "Debug: Total number of accounts to serialize: " << GetNumOfAccounts());
-    uint256_t totalNumOfAccounts = GetNumOfAccounts();
-    SetNumber<uint256_t>(dst, curOffset, totalNumOfAccounts, UINT256_SIZE);
-    curOffset += UINT256_SIZE;
-
-    vector<unsigned char> address_vec;
-    // [Addr 1] [Account 1] [Addr 2] [Account 2] .... [Addr n] [Account n]
-    for (auto entry : m_addressToAccount)
-    {
-        // Address
-        address_vec = entry.first.asBytes();
-
-        copy(address_vec.begin(), address_vec.end(), std::back_inserter(dst));
-        curOffset += ACC_ADDR_SIZE;
-        totalSerializedSize += ACC_ADDR_SIZE;
-
-        // Account
-        size_needed = entry.second.Serialize(dst, curOffset);
-        curOffset += size_needed;
-        totalSerializedSize += size_needed;
-    }
-
-    return totalSerializedSize;
+  }
 }
 
-int AccountStore::Deserialize(const vector<unsigned char>& src,
-                              unsigned int offset)
-{
-    // [Total number of accounts] [Addr 1] [Account 1] [Addr 2] [Account 2] .... [Addr n] [Account n]
-    // LOG_MARKER();
-
-    try
-    {
-        unsigned int curOffset = offset;
-        uint256_t totalNumOfAccounts
-            = GetNumber<uint256_t>(src, curOffset, UINT256_SIZE);
-        curOffset += UINT256_SIZE;
-
-        Address address;
-        Account account;
-        unsigned int numberOfAccountDeserialze = 0;
-        this->Init();
-        while (numberOfAccountDeserialze < totalNumOfAccounts)
-        {
-            numberOfAccountDeserialze++;
-
-            // Deserialize address
-            copy(src.begin() + curOffset,
-                 src.begin() + curOffset + ACC_ADDR_SIZE,
-                 address.asArray().begin());
-            curOffset += ACC_ADDR_SIZE;
-
-            // Deserialize account
-            // account.Deserialize(src, curOffset);
-            if (account.Deserialize(src, curOffset) != 0)
-            {
-                LOG_GENERAL(WARNING, "We failed to init account.");
-                return -1;
-            }
-            curOffset += ACCOUNT_SIZE;
-            m_addressToAccount[address] = account;
-            UpdateStateTrie(address, account);
-            // MoveUpdatesToDisk();
-        }
-        PrintAccountState();
-    }
-    catch (const std::exception& e)
-    {
-        LOG_GENERAL(WARNING,
-                    "Error with AccountStore::Deserialize." << ' ' << e.what());
-        return -1;
-    }
-    return 0;
+AccountStore::~AccountStore() {
+  // boost::filesystem::remove_all("./state");
+  if (m_scillaIPCServer != nullptr) {
+    m_scillaIPCServer->StopListening();
+  }
 }
 
-AccountStore& AccountStore::GetInstance()
-{
-    static AccountStore accountstore;
-    return accountstore;
+void AccountStore::Init() {
+  LOG_MARKER();
+
+  InitSoft();
+
+  lock_guard<mutex> g(m_mutexDB);
+
+  ContractStorage2::GetContractStorage().Reset();
+  m_db.ResetDB();
 }
 
-bool AccountStore::DoesAccountExist(const Address& address)
-{
-    LOG_MARKER();
+void AccountStore::SetScillaIPCServer(
+    std::shared_ptr<ScillaIPCServer> scillaIPCServer) {
+  lock_guard<mutex> g(m_mutexDelta);
+  m_accountStoreTemp->SetScillaIPCServer(scillaIPCServer);
+}
 
-    if (GetAccount(address) != nullptr)
-    {
-        return true;
-    }
+void AccountStore::InitSoft() {
+  LOG_MARKER();
 
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary);
+
+  AccountStoreTrie<OverlayDB, unordered_map<Address, Account>>::Init();
+
+  InitRevertibles();
+
+  InitTemp();
+}
+
+bool AccountStore::RefreshDB() {
+  LOG_MARKER();
+  lock_guard<mutex> g(m_mutexDB);
+  return m_db.RefreshDB();
+}
+
+void AccountStore::InitTemp() {
+  LOG_MARKER();
+
+  lock_guard<mutex> g(m_mutexDelta);
+
+  m_accountStoreTemp->Init();
+  m_stateDeltaSerialized.clear();
+
+  ContractStorage2::GetContractStorage().InitTempState(true);
+}
+
+void AccountStore::InitRevertibles() {
+  LOG_MARKER();
+
+  lock_guard<mutex> g(m_mutexRevertibles);
+
+  m_addressToAccountRevChanged.clear();
+  m_addressToAccountRevCreated.clear();
+
+  ContractStorage2::GetContractStorage().InitRevertibles();
+}
+
+AccountStore& AccountStore::GetInstance() {
+  static AccountStore accountstore;
+  return accountstore;
+}
+
+bool AccountStore::Serialize(bytes& src, unsigned int offset) const {
+  LOG_MARKER();
+  shared_lock<shared_timed_mutex> lock(m_mutexPrimary);
+  return AccountStoreTrie<
+      dev::OverlayDB, std::unordered_map<Address, Account>>::Serialize(src,
+                                                                       offset);
+}
+
+bool AccountStore::Deserialize(const bytes& src, unsigned int offset) {
+  LOG_MARKER();
+
+  this->Init();
+
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary);
+
+  if (!Messenger::GetAccountStore(src, offset, *this)) {
+    LOG_GENERAL(WARNING, "Messenger::GetAccountStore failed.");
     return false;
+  }
+
+  return true;
 }
 
-void AccountStore::AddAccount(const Address& address, const Account& account)
-{
-    LOG_MARKER();
+bool AccountStore::SerializeDelta() {
+  LOG_MARKER();
 
-    if (!DoesAccountExist(address))
-    {
-        m_addressToAccount.insert(make_pair(address, account));
-        // UpdateStateTrie(address, account);
-    }
-}
+  unique_lock<mutex> g(m_mutexDelta, defer_lock);
+  shared_lock<shared_timed_mutex> g2(m_mutexPrimary, defer_lock);
+  lock(g, g2);
 
-void AccountStore::AddAccount(const PubKey& pubKey, const Account& account)
-{
-    AddAccount(Account::GetAddressFromPublicKey(pubKey), account);
-}
+  m_stateDeltaSerialized.clear();
 
-bool AccountStore::UpdateAccounts(const uint64_t& blockNum,
-                                  const Transaction& transaction)
-{
-    LOG_MARKER();
-
-    const PubKey& senderPubKey = transaction.GetSenderPubKey();
-    const Address fromAddr = Account::GetAddressFromPublicKey(senderPubKey);
-    Address toAddr = transaction.GetToAddr();
-    const uint256_t& amount = transaction.GetAmount();
-
-    bool callContract = false;
-
-    if (transaction.GetData().size() > 0 && toAddr != NullAddress)
-    {
-        if (amount != 0)
-        {
-            LOG_GENERAL(
-                WARNING,
-                "The balance for a contract transaction shouldn't be non-zero");
-            return false;
-        }
-        callContract = true;
-    }
-
-    if (transaction.GetCode().size() > 0 && toAddr == NullAddress)
-    {
-        LOG_GENERAL(INFO, "Create Contract");
-
-        if (amount != 0)
-        {
-            LOG_GENERAL(
-                WARNING,
-                "The balance for a contract transaction shouldn't be non-zero");
-            return false;
-        }
-
-        // Create contract account
-        Account* account = GetAccount(fromAddr);
-        // FIXME: remove this, temporary way to test transactions
-        if (account == nullptr)
-        {
-            LOG_GENERAL(WARNING,
-                        "AddAccount... FIXME: remove this, temporary way to "
-                        "test transactions");
-            AddAccount(fromAddr, {10000000000, 0});
-        }
-
-        toAddr = Account::GetAddressForContract(
-            fromAddr, m_addressToAccount[fromAddr].GetNonce());
-        AddAccount(toAddr, {0, 0});
-        m_addressToAccount[toAddr].SetCode(transaction.GetCode());
-        // Store the immutable states
-        m_addressToAccount[toAddr].InitContract(transaction.GetData());
-
-        Account* toAccount = GetAccount(toAddr);
-        if (toAccount == nullptr)
-        {
-            LOG_GENERAL(WARNING,
-                        "The target contract account doesn't exist, which "
-                        "shouldn't happen!");
-            return false;
-        }
-
-        m_curBlockNum = blockNum;
-
-        if (ExportCreateContractFiles(toAccount))
-        {
-            if (!SysCommand::ExecuteCmdWithoutOutput(GetCreateContractCmdStr()))
-            {
-                LOG_GENERAL(
-                    WARNING,
-                    "Interpreter does not admit this contract creation");
-                return false;
-            }
-            if (!ParseCreateContractOutput())
-            {
-                m_addressToAccount.erase(toAddr);
-                return false;
-            }
-        }
-    }
-
-    TransferBalance(fromAddr, toAddr, amount);
-
-    if (callContract)
-    {
-        LOG_GENERAL(INFO, "Call Contract");
-
-        Account* toAccount = GetAccount(toAddr);
-        if (toAccount == nullptr)
-        {
-            LOG_GENERAL(WARNING, "The target contract account doesn't exist");
-            return false;
-        }
-
-        m_curBlockNum = blockNum;
-
-        // TODO: Implement the calling of interpreter in multi-thread
-        if (ExportCallContractFiles(toAccount, transaction.GetData()))
-        {
-            m_curContractAddr = toAddr;
-            if (!SysCommand::ExecuteCmdWithoutOutput(GetCallContractCmdStr()))
-            {
-                LOG_GENERAL(
-                    WARNING,
-                    "Interpreter does not admit this contract invocation");
-                return false;
-            }
-            if (!ParseCallContractOutput())
-            {
-                return false;
-            }
-        }
-    }
-
-    IncreaseNonce(fromAddr);
-
-    return true;
-}
-
-Json::Value AccountStore::GetBlockStateJson(const uint64_t& BlockNum) const
-{
-    Json::Value root;
-    Json::Value blockItem;
-    blockItem["vname"] = "BLOCKNUMBER";
-    blockItem["type"] = "BNum";
-    blockItem["value"] = to_string(BlockNum);
-    root.append(blockItem);
-    return root;
-}
-
-bool AccountStore::ExportCreateContractFiles(Account* contract)
-{
-    LOG_MARKER();
-
-    boost::filesystem::remove_all("./" + SCILLA_FILES);
-    boost::filesystem::create_directories("./" + SCILLA_FILES);
-
-    if (!(boost::filesystem::exists("./" + SCILLA_LOG)))
-    {
-        boost::filesystem::create_directories("./" + SCILLA_LOG);
-    }
-
-    Json::StreamWriterBuilder writeBuilder;
-    std::unique_ptr<Json::StreamWriter> writer(writeBuilder.newStreamWriter());
-    std::ofstream os;
-
-    // Scilla code
-    os.open(INPUT_CODE);
-    os << DataConversion::CharArrayToString(contract->GetCode());
-    os.close();
-
-    // Initialize Json
-    os.open(INIT_JSON);
-    writer->write(contract->GetInitJson(), &os);
-    os.close();
-
-    // Block Json
-    os.open(INPUT_BLOCKCHAIN_JSON);
-    writer->write(GetBlockStateJson(m_curBlockNum), &os);
-    os.close();
-
-    return true;
-}
-
-bool AccountStore::ExportCallContractFiles(
-    Account* contract, const vector<unsigned char>& contractData)
-{
-    LOG_MARKER();
-
-    boost::filesystem::remove_all("./" + SCILLA_FILES);
-    boost::filesystem::create_directories("./" + SCILLA_FILES);
-
-    Json::StreamWriterBuilder writeBuilder;
-    std::unique_ptr<Json::StreamWriter> writer(writeBuilder.newStreamWriter());
-    std::ofstream os;
-
-    // Scilla code
-    os.open(INPUT_CODE);
-    os << DataConversion::CharArrayToString(contract->GetCode());
-    os.close();
-
-    // Initialize Json
-    os.open(INIT_JSON);
-    writer->write(contract->GetInitJson(), &os);
-    os.close();
-
-    // State Json
-    os.open(INPUT_STATE_JSON);
-    writer->write(contract->GetStorageJson(), &os);
-    os.close();
-
-    // Block Json
-    os.open(INPUT_BLOCKCHAIN_JSON);
-    writer->write(GetBlockStateJson(m_curBlockNum), &os);
-    os.close();
-
-    // Message Json
-    Json::CharReaderBuilder readBuilder;
-    std::unique_ptr<Json::CharReader> reader(readBuilder.newCharReader());
-    Json::Value msgObj;
-    string dataStr(contractData.begin(), contractData.end());
-    LOG_GENERAL(INFO, "Contract Data: " << dataStr);
-    string errors;
-    if (reader->parse(dataStr.c_str(), dataStr.c_str() + dataStr.size(),
-                      &msgObj, &errors))
-    {
-        os.open(INPUT_MESSAGE_JSON);
-        os << dataStr;
-        os.close();
-    }
-    else
-    {
-        LOG_GENERAL(WARNING,
-                    "The Contract Data Json is corrupted, failed to process: "
-                        << errors);
-        boost::filesystem::remove_all("./" + SCILLA_FILES);
-        return false;
-    }
-    return true;
-}
-
-string AccountStore::GetCreateContractCmdStr()
-{
-    string ret = SCILLA_PATH + " -init " + INIT_JSON + " -iblockchain "
-        + INPUT_BLOCKCHAIN_JSON + " -o " + OUTPUT_JSON + " -i " + INPUT_CODE;
-    LOG_GENERAL(INFO, ret);
-    return ret;
-}
-
-string AccountStore::GetCallContractCmdStr()
-{
-    string ret = SCILLA_PATH + " -init " + INIT_JSON + " -istate "
-        + INPUT_STATE_JSON + " -iblockchain " + INPUT_BLOCKCHAIN_JSON
-        + " -imessage " + INPUT_MESSAGE_JSON + " -o " + OUTPUT_JSON + " -i "
-        + INPUT_CODE;
-    LOG_GENERAL(INFO, ret);
-    return ret;
-}
-
-bool AccountStore::ParseCreateContractOutput()
-{
-    LOG_MARKER();
-
-    ifstream in(OUTPUT_JSON, ios::binary);
-
-    if (!in.is_open())
-    {
-        LOG_GENERAL(WARNING,
-                    "Error opening output file or no output file generated");
-        return false;
-    }
-    string outStr{istreambuf_iterator<char>(in), istreambuf_iterator<char>()};
-    LOG_GENERAL(INFO, "Output: " << endl << outStr);
-    Json::CharReaderBuilder builder;
-    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-    Json::Value root;
-    string errors;
-    if (reader->parse(outStr.c_str(), outStr.c_str() + outStr.size(), &root,
-                      &errors))
-    {
-        return ParseCreateContractJsonOutput(root);
-    }
-    else
-    {
-        LOG_GENERAL(WARNING,
-                    "Failed to parse contract output json: " << errors);
-        return false;
-    }
-}
-
-bool AccountStore::ParseCreateContractJsonOutput(const Json::Value& json)
-{
-    LOG_MARKER();
-
-    if (!json.isMember("message") || !json.isMember("states"))
-    {
-        LOG_GENERAL(WARNING, "The json output of this contract is corrupted");
-        return false;
-    }
-
-    if (json["message"] == Json::nullValue
-        && json["states"] == Json::arrayValue)
-    {
-        // LOG_GENERAL(INFO, "Get desired json output from the interpreter for create contract");
-        return true;
-    }
-    LOG_GENERAL(WARNING,
-                "Didn't get desired json output from the interpreter for "
-                "create contract");
+  if (!Messenger::SetAccountStoreDelta(m_stateDeltaSerialized, 0,
+                                       *m_accountStoreTemp, *this)) {
+    LOG_GENERAL(WARNING, "Messenger::SetAccountStoreDelta failed.");
     return false;
+  }
+
+  return true;
 }
 
-bool AccountStore::ParseCallContractOutput()
-{
-    LOG_MARKER();
+void AccountStore::GetSerializedDelta(bytes& dst) {
+  lock_guard<mutex> g(m_mutexDelta);
 
-    ifstream in(OUTPUT_JSON, ios::binary);
+  dst.clear();
 
-    if (!in.is_open())
+  copy(m_stateDeltaSerialized.begin(), m_stateDeltaSerialized.end(),
+       back_inserter(dst));
+}
+
+bool AccountStore::DeserializeDelta(const bytes& src, unsigned int offset,
+                                    bool revertible) {
+  LOG_MARKER();
+
+  if (revertible) {
+    unique_lock<shared_timed_mutex> g(m_mutexPrimary, defer_lock);
+    unique_lock<mutex> g2(m_mutexRevertibles, defer_lock);
+    lock(g, g2);
+
+    if (!Messenger::GetAccountStoreDelta(src, offset, *this, revertible,
+                                         false)) {
+      LOG_GENERAL(WARNING, "Messenger::GetAccountStoreDelta failed.");
+      return false;
+    }
+  } else {
+    unique_lock<shared_timed_mutex> g(m_mutexPrimary);
+
+    if (!Messenger::GetAccountStoreDelta(src, offset, *this, revertible,
+                                         false)) {
+      LOG_GENERAL(WARNING, "Messenger::GetAccountStoreDelta failed.");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool AccountStore::DeserializeDeltaTemp(const bytes& src, unsigned int offset) {
+  lock_guard<mutex> g(m_mutexDelta);
+  return m_accountStoreTemp->DeserializeDelta(src, offset);
+}
+
+bool AccountStore::MoveRootToDisk(const h256& root) {
+  // convert h256 to bytes
+  if (!BlockStorage::GetBlockStorage().PutStateRoot(root.asBytes())) {
+    LOG_GENERAL(INFO, "FAIL: Put state root failed " << root.hex());
+    return false;
+  }
+  return true;
+}
+
+bool AccountStore::MoveUpdatesToDisk() {
+  LOG_MARKER();
+
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary, defer_lock);
+  unique_lock<mutex> g2(m_mutexDB, defer_lock);
+  lock(g, g2);
+
+  unordered_map<string, string> code_batch;
+  unordered_map<string, string> initdata_batch;
+
+  for (const auto& i : *m_addressToAccount) {
+    if (i.second.isContract()) {
+      if (ContractStorage2::GetContractStorage()
+              .GetContractCode(i.first)
+              .empty()) {
+        code_batch.insert({i.first.hex(), DataConversion::CharArrayToString(
+                                              i.second.GetCode())});
+      }
+
+      if (ContractStorage2::GetContractStorage().GetInitData(i.first).empty()) {
+        initdata_batch.insert({i.first.hex(), DataConversion::CharArrayToString(
+                                                  i.second.GetInitData())});
+      }
+    }
+  }
+
+  if (!ContractStorage2::GetContractStorage().PutContractCodeBatch(
+          code_batch)) {
+    LOG_GENERAL(WARNING, "PutContractCodeBatch failed");
+    return false;
+  }
+
+  if (!ContractStorage2::GetContractStorage().PutInitDataBatch(
+          initdata_batch)) {
+    LOG_GENERAL(WARNING, "PutInitDataBatch failed");
+    return false;
+  }
+
+  bool ret = true;
+
+  if (ret) {
+    if (!ContractStorage2::GetContractStorage().CommitStateDB()) {
+      LOG_GENERAL(WARNING,
+                  "CommitTempStateDB failed. need to rever the change on "
+                  "ContractCode");
+      ret = false;
+    }
+  }
+
+  if (!ret) {
+    for (const auto& it : code_batch) {
+      if (!ContractStorage2::GetContractStorage().DeleteContractCode(
+              h160(it.first))) {
+        LOG_GENERAL(WARNING, "Failed to delete contract code for " << it.first);
+      }
+    }
+  }
+
+  try {
+    lock_guard<mutex> g(m_mutexTrie);
+    if (!m_state.db()->commit()) {
+      LOG_GENERAL(WARNING, "LevelDB commit failed");
+    }
+    if (!MoveRootToDisk(m_state.root())) {
+      LOG_GENERAL(WARNING, "MoveRootToDisk failed " << m_state.root().hex());
+      return false;
+    }
+    m_prevRoot = m_state.root();
+  } catch (const boost::exception& e) {
+    LOG_GENERAL(WARNING, "Error with AccountStore::MoveUpdatesToDisk. "
+                             << boost::diagnostic_information(e));
+    return false;
+  }
+
+  m_addressToAccount->clear();
+
+  return true;
+}
+
+bool AccountStore::UpdateStateTrieFromTempStateDB() {
+  LOG_MARKER();
+
+  leveldb::Iterator* iter = nullptr;
+
+  while (iter == nullptr || iter->Valid()) {
+    vector<StateSharedPtr> states;
+    if (!BlockStorage::GetBlockStorage().GetTempStateInBatch(iter, states)) {
+      LOG_GENERAL(WARNING, "GetTempStateInBatch failed");
+      delete iter;
+      return false;
+    }
+    for (const auto& state : states) {
+      UpdateStateTrie(state->first, state->second);
+    }
+  }
+
+  delete iter;
+
+  if (!BlockStorage::GetBlockStorage().ResetDB(BlockStorage::TEMP_STATE)) {
+    LOG_GENERAL(WARNING, "BlockStorage::ResetDB (TEMP_STATE) failed");
+    return false;
+  }
+  return true;
+}
+
+void AccountStore::DiscardUnsavedUpdates() {
+  LOG_MARKER();
+
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary, defer_lock);
+  unique_lock<mutex> g2(m_mutexDB, defer_lock);
+  lock(g, g2);
+
+  try {
     {
+      lock_guard<mutex> g(m_mutexTrie);
+      m_state.db()->rollback();
+      m_state.setRoot(m_prevRoot);
+    }
+    m_addressToAccount->clear();
+  } catch (const boost::exception& e) {
+    LOG_GENERAL(WARNING, "Error with AccountStore::DiscardUnsavedUpdates. "
+                             << boost::diagnostic_information(e));
+  }
+}
+
+bool AccountStore::RetrieveFromDisk() {
+  LOG_MARKER();
+
+  InitSoft();
+
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary, defer_lock);
+  unique_lock<mutex> g2(m_mutexDB, defer_lock);
+  lock(g, g2);
+
+  bytes rootBytes;
+  if (!BlockStorage::GetBlockStorage().GetStateRoot(rootBytes)) {
+    // To support backward compatibilty - lookup with new binary trying to
+    // recover from old database
+    if (BlockStorage::GetBlockStorage().GetMetadata(STATEROOT, rootBytes)) {
+      if (!BlockStorage::GetBlockStorage().PutStateRoot(rootBytes)) {
         LOG_GENERAL(WARNING,
-                    "Error opening output file or no output file generated");
+                    "BlockStorage::PutStateRoot failed "
+                        << DataConversion::CharArrayToString(rootBytes));
         return false;
+      }
+    } else {
+      LOG_GENERAL(WARNING, "Failed to retrieve StateRoot from disk");
+      return false;
     }
-    string outStr{istreambuf_iterator<char>(in), istreambuf_iterator<char>()};
-    LOG_GENERAL(INFO, "Output: " << endl << outStr);
-    Json::CharReaderBuilder builder;
-    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-    Json::Value root;
-    string errors;
-    if (reader->parse(outStr.c_str(), outStr.c_str() + outStr.size(), &root,
-                      &errors))
-    {
-        return ParseCallContractJsonOutput(root);
-    }
-    else
-    {
-        LOG_GENERAL(WARNING,
-                    "Failed to parse contract output json: " << errors);
-        return false;
-    }
-}
+  }
 
-bool AccountStore::ParseCallContractJsonOutput(const Json::Value& json)
-{
-    LOG_MARKER();
-
-    if (!json.isMember("message") || !json.isMember("states"))
-    {
-        LOG_GENERAL(WARNING, "The json output of this contract is corrupted");
-        return false;
-    }
-
-    if (!json["message"].isMember("_tag")
-        || !json["message"].isMember("_amount")
-        || !json["message"].isMember("params"))
-    {
-        LOG_GENERAL(
-            WARNING,
-            "The message in the json output of this contract is corrupted");
-        return false;
-    }
-
-    int deducted = 0;
-
-    for (auto& s : json["states"])
-    {
-        if (!s.isMember("vname") || !s.isMember("type") || !s.isMember("value"))
-        {
-            LOG_GENERAL(WARNING,
-                        "Address: "
-                            << m_curContractAddr.hex()
-                            << ", The json output of states is corrupted");
-            continue;
-        }
-        string vname = s["vname"].asString();
-        string type = s["type"].asString();
-        string value;
-        if (type == "Map" || type == "ADT")
-        {
-            Json::StreamWriterBuilder writeBuilder;
-            std::unique_ptr<Json::StreamWriter> writer(
-                writeBuilder.newStreamWriter());
-            ostringstream oss;
-            writer->write(s["value"], &oss);
-            value = oss.str();
-        }
-        else
-        {
-            value = s["value"].asString();
-        }
-
-        if (vname == "_balance")
-        {
-            int newBalance = atoi(value.c_str());
-            deducted = static_cast<int>(
-                           m_addressToAccount[m_curContractAddr].GetBalance())
-                - newBalance;
-            m_addressToAccount[m_curContractAddr].SetBalance(newBalance);
-        }
-        else
-        {
-            m_addressToAccount[m_curContractAddr].SetStorage(vname, type,
-                                                             value);
-        }
-    }
-
-    /// The process after getting the output:
-    if (json["message"]["_tag"].asString() == "Main")
-    {
-        Address toAddr;
-        for (auto& p : json["message"]["params"])
-        {
-            if (p["vname"].asString() == "to"
-                && p["type"].asString() == "Address")
-            {
-                toAddr = Address(p["value"].asString());
-                break;
-            }
-        }
-        // A hacky way of refunding the contract the number of amount for the transaction, because the balance was affected by the parsing of _balance and the 'Main' message. Need to fix in the future
-        int amount = atoi(json["message"]["_amount"].asString().c_str());
-        if (amount == 0)
-        {
-            return true;
-        }
-
-        if (!TransferBalance(m_curContractAddr, toAddr, amount))
-        {
-            return false;
-        }
-        // what if the positive value is come from a failed function call
-        if (deducted > 0)
-        {
-            if (!IncreaseBalance(m_curContractAddr, deducted))
-            {
-                return false;
-            }
-        }
-        IncreaseNonce(m_curContractAddr);
-
-        return true;
-    }
-    else
-    {
-        LOG_GENERAL(INFO, "Call another contract");
-
-        Address toAddr;
-        Json::Value params;
-        for (auto& p : json["message"]["params"])
-        {
-            if (p["vname"].asString() == "to"
-                && p["type"].asString() == "Address")
-            {
-                toAddr = Address(p["value"].asString());
-            }
-            else
-            {
-                params.append(p);
-            }
-        }
-        Json::Value p_sender;
-        p_sender["vname"] = "sender";
-        p_sender["type"] = "Address";
-        p_sender["value"] = "0x" + m_curContractAddr.hex();
-        params.append(p_sender);
-
-        // if (params.empty())
-        // {
-        //     params = Json::arrayValue;
-        // }
-
-        Account* toAccount = GetAccount(toAddr);
-        if (toAccount == nullptr)
-        {
-            LOG_GENERAL(WARNING, "The target contract account doesn't exist");
-            return false;
-        }
-
-        if (ExportCallContractFiles(
-                toAccount,
-                CompositeContractData(json["message"]["_tag"].asString(),
-                                      json["message"]["_amount"].asString(),
-                                      params)))
-        {
-            Address t_address = m_curContractAddr;
-            m_curContractAddr = toAddr;
-            if (!SysCommand::ExecuteCmdWithoutOutput(GetCallContractCmdStr()))
-            {
-                LOG_GENERAL(WARNING,
-                            "Interpreter does not admit this contract chain "
-                            "invocation");
-                return false;
-            }
-            if (ParseCallContractOutput())
-            {
-                IncreaseNonce(t_address);
-                return true;
-            }
-            else
-            {
-                return false;
-            }
-        }
-        else
-        {
-            return false;
-        }
-    }
-}
-
-const std::vector<unsigned char>
-AccountStore::CompositeContractData(const std::string& funcName,
-                                    const std::string& amount,
-                                    const Json::Value& params)
-{
-    LOG_MARKER();
-    Json::Value obj;
-    obj["_tag"] = funcName;
-    obj["_amount"] = amount;
-    obj["params"] = params;
-
-    Json::StreamWriterBuilder writeBuilder;
-    std::unique_ptr<Json::StreamWriter> writer(writeBuilder.newStreamWriter());
-    ostringstream oss;
-    writer->write(obj, &oss);
-    string dataStr = oss.str();
-
-    return DataConversion::StringToCharArray(dataStr);
-}
-
-Account* AccountStore::GetAccount(const Address& address)
-{
-    //LOG_MARKER();
-
-    auto it = m_addressToAccount.find(address);
-    // LOG_GENERAL(INFO, (it != m_addressToAccount.end()));
-    if (it != m_addressToAccount.end())
-    {
-        return &it->second;
-    }
-
-    string accountDataString = m_state.at(address);
-    if (accountDataString.empty())
-    {
-        return nullptr;
-    }
-
-    dev::RLP accountDataRLP(accountDataString);
-    if (accountDataRLP.itemCount() != 4)
-    {
-        LOG_GENERAL(WARNING, "Account data corrupted");
-        return nullptr;
-    }
-
-    auto it2 = m_addressToAccount.emplace(
-        std::piecewise_construct, std::forward_as_tuple(address),
-        std::forward_as_tuple(
-            accountDataRLP[0].toInt<boost::multiprecision::uint256_t>(),
-            accountDataRLP[1].toInt<boost::multiprecision::uint256_t>()));
-
-    // Code Hash
-    if (accountDataRLP[3].toHash<dev::h256>() != dev::h256())
-    {
-        // Extract Code Content
-        it2.first->second.SetCode(
-            ContractStorage::GetContractStorage().GetContractCode(address));
-        if (accountDataRLP[3].toHash<dev::h256>()
-            != it2.first->second.GetCodeHash())
-        {
-            LOG_GENERAL(WARNING, "Account Code Content doesn't match Code Hash")
-            m_addressToAccount.erase(it2.first);
-            return nullptr;
-        }
-        // Storage Root
-        it2.first->second.SetStorageRoot(accountDataRLP[2].toHash<dev::h256>());
-    }
-
-    return &it2.first->second;
-}
-
-uint256_t AccountStore::GetNumOfAccounts() const
-{
-    LOG_MARKER();
-    return m_addressToAccount.size();
-}
-
-bool AccountStore::UpdateStateTrieAll()
-{
-    bool ret = true;
-    for (auto entry : m_addressToAccount)
-    {
-        if (!UpdateStateTrie(entry.first, entry.second))
-        {
-            ret = false;
-            break;
-        }
-    }
-    return ret;
-}
-
-bool AccountStore::UpdateStateTrie(const Address& address,
-                                   const Account& account)
-{
-    //LOG_MARKER();
-
-    dev::RLPStream rlpStream(4);
-    rlpStream << account.GetBalance() << account.GetNonce()
-              << account.GetStorageRoot() << account.GetCodeHash();
-    m_state.insert(address, &rlpStream.out());
-
-    return true;
-}
-
-bool AccountStore::IncreaseBalance(
-    const Address& address, const boost::multiprecision::uint256_t& delta)
-{
-    // LOG_MARKER();
-
-    if (delta == 0)
-    {
-        return true;
-    }
-
-    Account* account = GetAccount(address);
-
-    if (account != nullptr && account->IncreaseBalance(delta))
-    {
-        // UpdateStateTrie(address, *account);
-        return true;
-    }
-    else if (account == nullptr)
-    {
-        AddAccount(address, {delta, 0});
-        return true;
-    }
-
-    return false;
-}
-
-bool AccountStore::DecreaseBalance(
-    const Address& address, const boost::multiprecision::uint256_t& delta)
-{
-    // LOG_MARKER();
-
-    if (delta == 0)
-    {
-        return true;
-    }
-
-    Account* account = GetAccount(address);
-
-    if (account != nullptr && account->DecreaseBalance(delta))
-    {
-        // UpdateStateTrie(address, *account);
-        return true;
-    }
-    // FIXME: remove this, temporary way to test transactions
-    else if (account == nullptr)
-    {
-        LOG_GENERAL(WARNING,
-                    "AddAccount... FIXME: remove this, temporary way to test "
-                    "transactions");
-        AddAccount(address, {10000000000, 0});
-    }
-
-    return false;
-}
-
-bool AccountStore::TransferBalance(
-    const Address& from, const Address& to,
-    const boost::multiprecision::uint256_t& delta)
-{
-    // LOG_MARKER();
-
-    if (DecreaseBalance(from, delta) && IncreaseBalance(to, delta))
-    {
-        return true;
-    }
-
-    return false;
-}
-
-boost::multiprecision::uint256_t
-AccountStore::GetBalance(const Address& address)
-{
-    LOG_MARKER();
-
-    const Account* account = GetAccount(address);
-
-    if (account != nullptr)
-    {
-        return account->GetBalance();
-    }
-
-    return 0;
-}
-
-bool AccountStore::IncreaseNonce(const Address& address)
-{
-    //LOG_MARKER();
-
-    Account* account = GetAccount(address);
-
-    if (account != nullptr && account->IncreaseNonce())
-    {
-        // UpdateStateTrie(address, *account);
-        return true;
-    }
-
-    return false;
-}
-
-boost::multiprecision::uint256_t AccountStore::GetNonce(const Address& address)
-{
-    //LOG_MARKER();
-
-    Account* account = GetAccount(address);
-
-    if (account != nullptr)
-    {
-        return account->GetNonce();
-    }
-
-    return 0;
-}
-
-dev::h256 AccountStore::GetStateRootHash() const
-{
-    LOG_MARKER();
-
-    return m_state.root();
-}
-
-void AccountStore::MoveRootToDisk(const dev::h256& root)
-{
-    //convert h256 to bytes
-    if (!BlockStorage::GetBlockStorage().PutMetadata(STATEROOT, root.asBytes()))
-        LOG_GENERAL(INFO, "FAIL: Put metadata failed");
-}
-
-void AccountStore::MoveUpdatesToDisk()
-{
-    LOG_MARKER();
-
-    ContractStorage::GetContractStorage().GetStateDB().commit();
-    for (auto i : m_addressToAccount)
-    {
-        if (!ContractStorage::GetContractStorage().PutContractCode(
-                i.first, i.second.GetCode()))
-        {
-            LOG_GENERAL(WARNING, "Write Contract Code to Disk Failed");
-            continue;
-        }
-        i.second.Commit();
-    }
-    m_state.db()->commit();
-    prevRoot = m_state.root();
-    MoveRootToDisk(prevRoot);
-}
-
-void AccountStore::DiscardUnsavedUpdates()
-{
-    LOG_MARKER();
-
-    ContractStorage::GetContractStorage().GetStateDB().rollback();
-    for (auto i : m_addressToAccount)
-    {
-        i.second.RollBack();
-    }
-    m_state.db()->rollback();
-    m_state.setRoot(prevRoot);
-    m_addressToAccount.clear();
-}
-
-void AccountStore::PrintAccountState()
-{
-    LOG_MARKER();
-
-    LOG_GENERAL(INFO, "Printing Account State");
-    for (auto entry : m_addressToAccount)
-    {
-        LOG_GENERAL(INFO, entry.first << " " << entry.second);
-    }
-    LOG_GENERAL(INFO, "State Root: " << GetStateRootHash());
-}
-
-bool AccountStore::RetrieveFromDisk()
-{
-    LOG_MARKER();
-    std::vector<unsigned char> rootBytes;
-    if (!BlockStorage::GetBlockStorage().GetMetadata(STATEROOT, rootBytes))
-    {
-        return false;
-    }
-    dev::h256 root(rootBytes);
+  try {
+    h256 root(rootBytes);
+    LOG_GENERAL(INFO, "StateRootHash:" << root.hex());
+    lock_guard<mutex> g(m_mutexTrie);
     m_state.setRoot(root);
-    for (auto i : m_state)
-    {
-        Address address(i.first);
-        LOG_GENERAL(INFO, "Address: " << address.hex());
-        dev::RLP rlp(i.second);
-        if (rlp.itemCount() != 4)
-        {
-            LOG_GENERAL(WARNING, "Account data corrupted");
-            continue;
-        }
-        Account account(rlp[0].toInt<boost::multiprecision::uint256_t>(),
-                        rlp[1].toInt<boost::multiprecision::uint256_t>());
-        // Code Hash
-        if (rlp[3].toHash<dev::h256>() != dev::h256())
-        {
-            // Extract Code Content
-            account.SetCode(
-                ContractStorage::GetContractStorage().GetContractCode(address));
-            if (rlp[3].toHash<dev::h256>() != account.GetCodeHash())
-            {
-                LOG_GENERAL(WARNING,
-                            "Account Code Content doesn't match Code Hash")
-                continue;
-            }
-            // Storage Root
-            account.SetStorageRoot(rlp[2].toHash<dev::h256>());
-        }
-        m_addressToAccount.insert({address, account});
-    }
-    return true;
+  } catch (const boost::exception& e) {
+    LOG_GENERAL(WARNING, "Error with AccountStore::RetrieveFromDisk. "
+                             << boost::diagnostic_information(e));
+    return false;
+  }
+  return true;
 }
 
-void AccountStore::RepopulateStateTrie()
-{
-    LOG_MARKER();
-    m_state.init();
-    prevRoot = m_state.root();
-    UpdateStateTrieAll();
+Account* AccountStore::GetAccountTemp(const Address& address) {
+  return m_accountStoreTemp->GetAccount(address);
+}
+
+bool AccountStore::UpdateAccountsTemp(const uint64_t& blockNum,
+                                      const unsigned int& numShards,
+                                      const bool& isDS,
+                                      const Transaction& transaction,
+                                      TransactionReceipt& receipt) {
+  // LOG_MARKER();
+
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary, defer_lock);
+  unique_lock<mutex> g2(m_mutexDelta, defer_lock);
+  lock(g, g2);
+
+  return m_accountStoreTemp->UpdateAccounts(blockNum, numShards, isDS,
+                                            transaction, receipt);
+}
+
+bool AccountStore::UpdateCoinbaseTemp(const Address& rewardee,
+                                      const Address& genesisAddress,
+                                      const uint128_t& amount) {
+  // LOG_MARKER();
+
+  lock_guard<mutex> g(m_mutexDelta);
+
+  if (m_accountStoreTemp->GetAccount(rewardee) == nullptr) {
+    m_accountStoreTemp->AddAccount(rewardee, {0, 0});
+  }
+  return m_accountStoreTemp->TransferBalance(genesisAddress, rewardee, amount);
+  // Should the nonce increase ??
+}
+
+uint128_t AccountStore::GetNonceTemp(const Address& address) {
+  lock_guard<mutex> g(m_mutexDelta);
+
+  if (m_accountStoreTemp->GetAddressToAccount()->find(address) !=
+      m_accountStoreTemp->GetAddressToAccount()->end()) {
+    return m_accountStoreTemp->GetNonce(address);
+  } else {
+    return this->GetNonce(address);
+  }
+}
+
+StateHash AccountStore::GetStateDeltaHash() {
+  lock_guard<mutex> g(m_mutexDelta);
+
+  bool isEmpty = true;
+
+  for (unsigned char i : m_stateDeltaSerialized) {
+    if (i != 0) {
+      isEmpty = false;
+      break;
+    }
+  }
+
+  if (isEmpty) {
+    return StateHash();
+  }
+
+  SHA2<HashType::HASH_VARIANT_256> sha2;
+  sha2.Update(m_stateDeltaSerialized);
+  return StateHash(sha2.Finalize());
+}
+
+void AccountStore::CommitTemp() {
+  LOG_MARKER();
+  if (!DeserializeDelta(m_stateDeltaSerialized, 0)) {
+    LOG_GENERAL(WARNING, "DeserializeDelta failed.");
+  }
+}
+
+void AccountStore::CommitTempRevertible() {
+  LOG_MARKER();
+
+  InitRevertibles();
+
+  if (!DeserializeDelta(m_stateDeltaSerialized, 0, true)) {
+    LOG_GENERAL(WARNING, "DeserializeDelta failed.");
+  }
+}
+
+void AccountStore::RevertCommitTemp() {
+  LOG_MARKER();
+
+  unique_lock<shared_timed_mutex> g(m_mutexPrimary);
+
+  // Revert changed
+  for (auto const& entry : m_addressToAccountRevChanged) {
+    // LOG_GENERAL(INFO, "Revert changed address: " << entry.first);
+    (*m_addressToAccount)[entry.first] = entry.second;
+    UpdateStateTrie(entry.first, entry.second);
+  }
+  for (auto const& entry : m_addressToAccountRevCreated) {
+    // LOG_GENERAL(INFO, "Remove created address: " << entry.first);
+    RemoveAccount(entry.first);
+    RemoveFromTrie(entry.first);
+  }
+
+  ContractStorage2::GetContractStorage().RevertContractStates();
 }

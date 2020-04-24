@@ -1,229 +1,492 @@
-/**
-* Copyright (c) 2018 Zilliqa 
-* This source code is being disclosed to you solely for the purpose of your participation in 
-* testing Zilliqa. You may view, compile and run the code for that purpose and pursuant to 
-* the protocols and algorithms that are programmed into, and intended by, the code. You may 
-* not do anything else with the code without express permission from Zilliqa Research Pte. Ltd., 
-* including modifying or publishing the code (or any part of it), and developing or forming 
-* another public or private blockchain network. This source code is provided ‘as is’ and no 
-* warranties are given as to title or non-infringement, merchantability or fitness for purpose 
-* and, to the extent permitted by law, all liability for your use of the code is disclaimed. 
-* Some programs in this code are governed by the GNU General Public License v3.0 (available at 
-* https://www.gnu.org/licenses/gpl-3.0.en.html) (‘GPLv3’). The programs that are governed by 
-* GPLv3.0 are those programs that are located in the folders src/depends and tests/depends 
-* and which include a reference to GPLv3 in their program files.
-**/
+/*
+ * Copyright (C) 2019 Zilliqa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
 
 #include "Retriever.h"
 
+#include <stdlib.h>
 #include <algorithm>
 #include <exception>
-#include <stdlib.h>
 #include <vector>
-
-#include <boost/filesystem.hpp>
 
 #include "libData/AccountData/AccountStore.h"
 #include "libData/AccountData/Transaction.h"
 #include "libPersistence/BlockStorage.h"
+#include "libUtils/DataConversion.h"
+#include "libUtils/FileSystem.h"
 
-using namespace boost::filesystem;
-namespace filesys = boost::filesystem;
+Retriever::Retriever(Mediator& mediator) : m_mediator(mediator) {}
 
-Retriever::Retriever(Mediator& mediator)
-    : m_mediator(mediator)
-{
-}
+bool Retriever::RetrieveTxBlocks(bool trimIncompletedBlocks) {
+  LOG_MARKER();
 
-void Retriever::RetrieveDSBlocks(bool& result)
-{
-    LOG_MARKER();
+  std::vector<bytes> extraStateDeltas;
 
-    std::list<DSBlockSharedPtr> blocks;
-    if (!BlockStorage::GetBlockStorage().GetAllDSBlocks(blocks))
-    {
-        LOG_GENERAL(WARNING, "RetrieveDSBlocks skipped or incompleted");
-        result = false;
-        return;
-    }
+  TxBlockSharedPtr latestTxBlock;
+  if (!BlockStorage::GetBlockStorage().GetLatestTxBlock(latestTxBlock)) {
+    LOG_GENERAL(WARNING, "GetLatestTxBlock failed");
+    return false;
+  }
 
-    blocks.sort([](const DSBlockSharedPtr& a, const DSBlockSharedPtr& b) {
-        return a->GetHeader().GetBlockNum() < b->GetHeader().GetBlockNum();
-    });
+  uint64_t lastBlockNum = latestTxBlock->GetHeader().GetBlockNum();
 
-    /// Check whether the termination of last running happens before the last DSEpoch properly ended.
-    std::vector<unsigned char> isDSIncompleted;
-    if (BlockStorage::GetBlockStorage().GetMetadata(MetaType::DSINCOMPLETED,
-                                                    isDSIncompleted))
-    {
-        if (isDSIncompleted[0] == '1')
-        {
-            LOG_GENERAL(INFO, "Has incompleted DS Block");
-            blocks.pop_back();
-            if (BlockStorage::GetBlockStorage().DeleteDSBlock(blocks.size()))
-            {
-                BlockStorage::GetBlockStorage().PutMetadata(
-                    MetaType::DSINCOMPLETED, {'0'});
-            }
-            hasIncompletedDS = true;
+  unsigned int extra_txblocks = (lastBlockNum + 1) % NUM_FINAL_BLOCK_PER_POW;
+
+  for (uint64_t blockNum = lastBlockNum + 1 - extra_txblocks;
+       blockNum <= lastBlockNum; blockNum++) {
+    bytes stateDelta;
+    if (!BlockStorage::GetBlockStorage().GetStateDelta(blockNum, stateDelta)) {
+      LOG_GENERAL(INFO, "Didn't find the state-delta for txBlkNum: "
+                            << blockNum << ". Try fetching it from seeds");
+      unsigned int retry = 1;
+      while (retry <= RETRY_GETSTATEDELTAS_COUNT) {
+        // Get the state-delta for this txBlock from random seed nodes
+        std::unique_lock<std::mutex> cv_lk(
+            m_mediator.m_lookup->m_mutexSetStateDeltaFromSeed);
+        m_mediator.m_lookup->m_skipAddStateDeltaToAccountStore = true;
+        m_mediator.m_lookup->GetStateDeltaFromSeedNodes(blockNum);
+        if (m_mediator.m_lookup->cv_setStateDeltaFromSeed.wait_for(
+                cv_lk,
+                std::chrono::seconds(GETSTATEDELTAS_TIMEOUT_IN_SECONDS)) ==
+            std::cv_status::timeout) {
+          LOG_GENERAL(WARNING,
+                      "[Retry: " << retry
+                                 << "] Didn't receive statedelta for txBlkNum: "
+                                 << blockNum << "! Will try again");
+          retry++;
+        } else {
+          break;
         }
+      }
+      // if state-delta is still not fetched from extra txblocks set, simple
+      // skip all extra blocks
+      if (retry > RETRY_GETSTATEDELTAS_COUNT) {
+        extraStateDeltas.clear();
+        trimIncompletedBlocks = true;
+        break;
+      }
+
+      // got state-delta at last
+      BlockStorage::GetBlockStorage().GetStateDelta(blockNum, stateDelta);
+      BlockStorage::GetBlockStorage().DeleteStateDelta(blockNum);
     }
-    else
-    {
-        LOG_GENERAL(WARNING, "No GetMetadata or failed");
-        result = false;
-        return;
+    // store it.
+    extraStateDeltas.push_back(stateDelta);
+  }
+
+  if ((lastBlockNum - extra_txblocks + 1) %
+          (INCRDB_DSNUMS_WITH_STATEDELTAS * NUM_FINAL_BLOCK_PER_POW) ==
+      0) {
+    // we must have latest state currently. so need not recreate states
+    LOG_GENERAL(INFO, "Current state is up-to-date until txblk :"
+                          << lastBlockNum - extra_txblocks);
+  } else {
+    // create states from last INCRDB_DSNUMS_WITH_STATEDELTAS *
+    // NUM_FINAL_BLOCK_PER_POW txn blocks
+    unsigned int lower_bound_txnblk =
+        ((lastBlockNum - extra_txblocks + 1) >
+         INCRDB_DSNUMS_WITH_STATEDELTAS * NUM_FINAL_BLOCK_PER_POW)
+            ? (((lastBlockNum - extra_txblocks + 1) /
+                (INCRDB_DSNUMS_WITH_STATEDELTAS * NUM_FINAL_BLOCK_PER_POW)) *
+               (INCRDB_DSNUMS_WITH_STATEDELTAS * NUM_FINAL_BLOCK_PER_POW))
+            : 0;
+    unsigned int upper_bound_txnblk = lastBlockNum - extra_txblocks;
+
+    LOG_GENERAL(INFO, "Will try recreating state from txnblks: "
+                          << lower_bound_txnblk << " - " << upper_bound_txnblk);
+
+    // clear all the state deltas from disk.
+    if (!BlockStorage::GetBlockStorage().ResetDB(BlockStorage::STATE_DELTA)) {
+      LOG_GENERAL(WARNING, "BlockStorage::ResetDB failed");
+      return false;
     }
 
-    for (const auto& block : blocks)
-    {
-        m_mediator.m_dsBlockChain.AddBlock(*block);
+    std::string target = STORAGE_PATH + PERSISTENCE_PATH + "/stateDelta";
+    unsigned int firstStateDeltaIndex = lower_bound_txnblk;
+    for (unsigned int i = lower_bound_txnblk; i <= upper_bound_txnblk; i++) {
+      // Check if StateDeltaFromS3/StateDelta_{i} exists and copy over to the
+      // local persistence/stateDelta
+      std::string source = STORAGE_PATH + STATEDELTAFROMS3_PATH +
+                           "/stateDelta_" + std::to_string(i);
+      if (boost::filesystem::exists(source)) {
+        try {
+          recursive_copy_dir(source, target);
+        } catch (std::exception& e) {
+          LOG_GENERAL(FATAL, "Failed to copy over stateDelta for TxBlk:" << i);
+        }
+
+        if ((i + 1) % NUM_FINAL_BLOCK_PER_POW ==
+            0) {  // state-delta from vacous epoch
+          // refresh state-delta after copy over
+          if (!BlockStorage::GetBlockStorage().RefreshDB(
+                  BlockStorage::STATE_DELTA)) {
+            LOG_GENERAL(WARNING, "BlockStorage::RefreshDB failed");
+            return false;
+          }
+
+          // generate state now for NUM_FINAL_BLOCK_PER_POW statedeltas
+          for (unsigned int j = firstStateDeltaIndex; j <= i; j++) {
+            bytes stateDelta;
+            LOG_GENERAL(
+                INFO,
+                "Try fetching statedelta and deserializing to state for txnBlk:"
+                    << j);
+            if (BlockStorage::GetBlockStorage().GetStateDelta(j, stateDelta)) {
+              if (!AccountStore::GetInstance().DeserializeDelta(stateDelta,
+                                                                0)) {
+                LOG_GENERAL(
+                    WARNING,
+                    "AccountStore::GetInstance().DeserializeDelta failed");
+                return false;
+              }
+
+              TxBlockSharedPtr txBlockPerDelta;
+              if (!BlockStorage::GetBlockStorage().GetTxBlock(
+                      j, txBlockPerDelta)) {
+                LOG_GENERAL(WARNING, "GetTxBlock failed for " << j);
+                return false;
+              }
+
+              if (AccountStore::GetInstance().GetStateRootHash() !=
+                  txBlockPerDelta->GetHeader().GetStateRootHash()) {
+                LOG_GENERAL(
+                    WARNING,
+                    "StateRoot in TxBlock(BlockNum: "
+                        << j << ") : does not match retrieved stateroot hash");
+                return false;
+              }
+            }
+          }
+          // commit the state to disk
+          if (!AccountStore::GetInstance().MoveUpdatesToDisk()) {
+            LOG_GENERAL(WARNING, "AccountStore::MoveUpdatesToDisk failed");
+            return false;
+            ;
+          }
+          // clear the stateDelta db
+          if (!BlockStorage::GetBlockStorage().ResetDB(
+                  BlockStorage::STATE_DELTA)) {
+            LOG_GENERAL(WARNING, "BlockStorage::ResetDB (STATE_DELTA) failed");
+            return false;
+          }
+          firstStateDeltaIndex = i + 1;
+        }
+      } else  // we rely on next statedelta that covers this missing one
+      {
+        LOG_GENERAL(DEBUG, "Didn't find state-delta for TxnBlk:"
+                               << i << ". This can happen. Not a problem!");
+        // Do nothing
+      }
     }
+  }
 
-    result = true;
-}
-
-void Retriever::RetrieveTxBlocks(bool& result)
-{
-    LOG_MARKER();
-    std::list<TxBlockSharedPtr> blocks;
-    if (!BlockStorage::GetBlockStorage().GetAllTxBlocks(blocks))
-    {
-        LOG_GENERAL(WARNING, "RetrieveTxBlocks skipped or incompleted");
-        result = false;
-        return;
+  if (boost::filesystem::exists(STORAGE_PATH + STATEDELTAFROMS3_PATH)) {
+    try {
+      boost::filesystem::remove_all(STORAGE_PATH + STATEDELTAFROMS3_PATH);
+    } catch (std::exception& e) {
+      LOG_GENERAL(WARNING, "Failed to remove " + STORAGE_PATH +
+                               STATEDELTAFROMS3_PATH + " directory");
     }
+  }
 
-    blocks.sort([](const TxBlockSharedPtr& a, const TxBlockSharedPtr& b) {
-        return a->GetHeader().GetBlockNum() < b->GetHeader().GetBlockNum();
-    });
-
+  if (trimIncompletedBlocks) {
     // truncate the extra final blocks at last
-    int totalSize = blocks.size();
-    int extra_txblocks = totalSize % NUM_FINAL_BLOCK_PER_POW;
-    for (int i = 0; i < extra_txblocks; ++i)
-    {
-        BlockStorage::GetBlockStorage().DeleteTxBlock(totalSize - i);
-        blocks.pop_back();
+    for (unsigned int i = 0; i < extra_txblocks; ++i) {
+      if (!BlockStorage::GetBlockStorage().DeleteTxBlock(lastBlockNum - i)) {
+        LOG_GENERAL(WARNING, "BlockStorage::DeleteTxBlock " << lastBlockNum - i
+                                                            << " failed");
+      }
     }
-
-    for (const auto& block : blocks)
-        m_mediator.m_txBlockChain.AddBlock(*block);
-
-    result = true;
-}
-
-#ifndef IS_LOOKUP_NODE
-bool Retriever::RetrieveTxBodiesDB()
-{
-    filesys::path p("./" + PERSISTENCE_PATH + "/" + TX_BODY_SUBDIR);
-    if (filesys::exists(p))
-    {
-        std::vector<std::string> dbNames;
-        for (auto& entry :
-             boost::make_iterator_range(filesys::directory_iterator(p), {}))
-        {
-            LOG_GENERAL(INFO,
-                        "Load txBodyDB: " << entry.path().filename().string());
-            dbNames.push_back(entry.path().filename().string());
-        }
-        std::sort(dbNames.begin(), dbNames.end());
-
-        // keep at most NUM_DS_KEEP_TX_BODY num of DB, ignore the temp one if exists
-        for (unsigned int i = 0;
-             i < (dbNames.size() <= NUM_DS_KEEP_TX_BODY
-                      ? (hasIncompletedDS ? dbNames.size() - 1 : dbNames.size())
-                      : NUM_DS_KEEP_TX_BODY);
-             i++)
-        {
-            if (!BlockStorage::GetBlockStorage().PushBackTxBodyDB(
-                    std::stoi(dbNames[i])))
-            {
-                LOG_GENERAL(WARNING,
-                            "PushBackTxBodyDB Failed, investigate why!");
-                return false;
-            }
-        }
-
-        // remove the temp txbodydb if it exists
-        if (dbNames.size() > NUM_DS_KEEP_TX_BODY)
-        {
-            if (dbNames.size() == NUM_DS_KEEP_TX_BODY + 1)
-            {
-                filesys::remove_all(p.string() + "/"
-                                    + dbNames[NUM_DS_KEEP_TX_BODY]);
-            }
-            else
-            {
-                LOG_GENERAL(WARNING,
-                            "We got extra txBody Database, Investigate why!");
-                return false;
-            }
-        }
-        else if (hasIncompletedDS)
-        {
-            filesys::remove_all(p.string() + "/" + dbNames.back());
-        }
-    }
-    else
-    {
-        LOG_GENERAL(WARNING, "No subdirectory found");
-        // return false;
-    }
-
-    return true;
-}
-#else // IS_LOOKUP_NODE
-bool Retriever::CleanExtraTxBodies()
-{
-    LOG_MARKER();
-    std::list<TxnHash> txnHashes;
-    if (BlockStorage::GetBlockStorage().GetAllTxBodiesTmp(txnHashes))
-    {
-        for (auto i : txnHashes)
-        {
-            if (!BlockStorage::GetBlockStorage().DeleteTxBody(i))
-            {
-                LOG_GENERAL(WARNING, "FAIL: To delete TxHash in TxBodiesTmpDB");
-                return false;
-            }
-        }
-    }
-    return BlockStorage::GetBlockStorage().ResetDB(BlockStorage::TX_BODY_TMP);
-}
-#endif // IS_LOOKUP_NODE
-
-bool Retriever::RetrieveStates()
-{
-    LOG_MARKER();
-    return AccountStore::GetInstance().RetrieveFromDisk();
-}
-
-bool Retriever::ValidateStates()
-{
-    LOG_MARKER();
-    if (m_mediator.m_txBlockChain.GetLastBlock().GetHeader().GetStateRootHash()
-        == AccountStore::GetInstance().GetStateRootHash())
-    {
-        LOG_GENERAL(INFO, "ValidateStates passed.");
-        AccountStore::GetInstance().RepopulateStateTrie();
-        return true;
-    }
-    else
-    {
-        LOG_GENERAL(WARNING, "ValidateStates failed.");
+  } else {
+    /// Put extra state delta from last DS epoch
+    unsigned int extra_delta_index = lastBlockNum - extra_txblocks + 1;
+    for (const auto& stateDelta : extraStateDeltas) {
+      if (!AccountStore::GetInstance().DeserializeDelta(stateDelta, 0)) {
+        LOG_GENERAL(WARNING,
+                    "AccountStore::GetInstance().DeserializeDelta failed");
         return false;
+      }
+      BlockStorage::GetBlockStorage().PutStateDelta(extra_delta_index++,
+                                                    stateDelta);
     }
+  }
+
+  m_mediator.m_node->AddBlock(*latestTxBlock);
+
+  return true;
 }
 
-void Retriever::CleanAll()
-{
-    if (BlockStorage::GetBlockStorage().ResetAll())
-    {
-        LOG_GENERAL(INFO, "Reset DB Succeed");
+bool Retriever::RetrieveBlockLink(bool trimIncompletedBlocks) {
+  std::list<BlockLink> blocklinks;
+
+  auto dsComm = m_mediator.m_blocklinkchain.GetBuiltDSComm();
+
+  if (!BlockStorage::GetBlockStorage().GetAllBlockLink(blocklinks)) {
+    LOG_GENERAL(WARNING, "RetrieveTxBlocks skipped or incompleted");
+    return false;
+  }
+  blocklinks.sort([](const BlockLink& a, const BlockLink& b) {
+    return std::get<BlockLinkIndex::INDEX>(a) <
+           std::get<BlockLinkIndex::INDEX>(b);
+  });
+
+  if (!blocklinks.empty()) {
+    if (m_mediator.m_ds->m_latestActiveDSBlockNum == 0) {
+      bytes latestActiveDSBlockNumVec;
+      if (!BlockStorage::GetBlockStorage().GetMetadata(
+              MetaType::LATESTACTIVEDSBLOCKNUM, latestActiveDSBlockNumVec)) {
+        LOG_GENERAL(WARNING, "Get LatestActiveDSBlockNum failed");
+        return false;
+      }
+
+      auto dsBlockNumStr =
+          DataConversion::CharArrayToString(latestActiveDSBlockNumVec);
+      try {
+        m_mediator.m_ds->m_latestActiveDSBlockNum = std::stoull(dsBlockNumStr);
+      } catch (const std::exception& e) {
+        LOG_GENERAL(WARNING, "Cannot convert invalid DS block number "
+                                 << dsBlockNumStr << ", exception "
+                                 << e.what());
+        return false;
+      }
     }
-    else
-    {
-        LOG_GENERAL(WARNING, "FAIL: Reset DB Failed");
+  } else {
+    return false;
+  }
+
+  /// Check whether the termination of last running happens before the last
+  /// DSEpoch properly ended.
+  uint64_t epochFinNum = 0;
+  bool toDelete = false;
+  if (!BlockStorage::GetBlockStorage().GetEpochFin(epochFinNum)) {
+    LOG_GENERAL(WARNING, "BlockStorage::GetEpochFin failed");
+    // return false;
+    bytes isDSIncompleted;
+    if (!BlockStorage::GetBlockStorage().GetMetadata(MetaType::DSINCOMPLETED,
+                                                     isDSIncompleted)) {
+      LOG_GENERAL(WARNING, "No GetMetadata or failed");
+      return false;
     }
+    if (isDSIncompleted[0] == '1') {
+      /// Removing incompleted DS for upgrading protocol
+      /// Keeping incompleted DS for node recovery
+      if (trimIncompletedBlocks) {
+        LOG_GENERAL(INFO, "Has incompleted DS Block, remove it");
+        toDelete = true;
+      }
+    }
+  }
+
+  if (!BlockStorage::GetBlockStorage().ResetDB(
+          BlockStorage::DBTYPE::BLOCKLINK)) {
+    LOG_GENERAL(WARNING, "BlockStorage::ResetDB (BLOCKLINK) failed");
+    return false;
+  }
+
+  uint64_t lastDsIndex = std::get<BlockLinkIndex::DSINDEX>(blocklinks.back());
+  const BlockType lastType =
+      std::get<BlockLinkIndex::BLOCKTYPE>(blocklinks.back());
+  if (lastType != BlockType::DS) {
+    if (lastDsIndex == 0) {
+      LOG_GENERAL(WARNING, "FATAL: last ds index is 0 and blockType not DS");
+      return false;
+    }
+    lastDsIndex--;
+  }
+
+  std::list<BlockLink>::iterator blocklinkItr;
+  for (blocklinkItr = blocklinks.begin(); blocklinkItr != blocklinks.end();
+       ++blocklinkItr) {
+    const auto& blocklink = *blocklinkItr;
+
+    if (std::get<BlockLinkIndex::BLOCKTYPE>(blocklink) == BlockType::DS) {
+      DSBlockSharedPtr dsblock;
+      if (!BlockStorage::GetBlockStorage().GetDSBlock(
+              std::get<BlockLinkIndex::DSINDEX>(blocklink), dsblock)) {
+        LOG_GENERAL(WARNING,
+                    "Could not find ds block num "
+                        << std::get<BlockLinkIndex::DSINDEX>(blocklink));
+        return false;
+      }
+
+      if (std::get<BlockLinkIndex::DSINDEX>(blocklink) == lastDsIndex &&
+          trimIncompletedBlocks) {
+        if (toDelete) {
+          LOG_GENERAL(INFO, "Broke at DS Index " << lastDsIndex);
+          if (!BlockStorage::GetBlockStorage().PutEpochFin(
+                  dsblock->GetHeader().GetEpochNum())) {
+            LOG_GENERAL(WARNING, "BlockStorage::PutEpochFin failed "
+                                     << dsblock->GetHeader().GetEpochNum());
+            return false;
+          }
+          break;
+        } else if (dsblock->GetHeader().GetEpochNum() >= epochFinNum) {
+          LOG_GENERAL(INFO, "Broke at DS Index " << lastDsIndex);
+          toDelete = true;
+          break;
+        }
+      }
+
+      m_mediator.m_node->UpdateDSCommitteeComposition(dsComm, *dsblock);
+      m_mediator.m_dsBlockChain.AddBlock(*dsblock);
+
+    } else if (std::get<BlockLinkIndex::BLOCKTYPE>(blocklink) ==
+               BlockType::VC) {
+      VCBlockSharedPtr vcblock;
+
+      if (!BlockStorage::GetBlockStorage().GetVCBlock(
+              std::get<BlockLinkIndex::BLOCKHASH>(blocklink), vcblock)) {
+        LOG_GENERAL(WARNING,
+                    "Could not find vc with blockHash "
+                        << std::get<BlockLinkIndex::BLOCKHASH>(blocklink));
+        return false;
+      }
+      m_mediator.m_node->UpdateRetrieveDSCommitteeCompositionAfterVC(*vcblock,
+                                                                     dsComm);
+
+    } else if (std::get<BlockLinkIndex::BLOCKTYPE>(blocklink) ==
+               BlockType::FB) {
+      FallbackBlockSharedPtr fallbackwshardingstruct;
+      if (!BlockStorage::GetBlockStorage().GetFallbackBlock(
+              std::get<BlockLinkIndex::BLOCKHASH>(blocklink),
+              fallbackwshardingstruct)) {
+        LOG_GENERAL(WARNING,
+                    "Could not find vc with blockHash "
+                        << std::get<BlockLinkIndex::BLOCKHASH>(blocklink));
+        return false;
+      }
+      uint32_t shard_id =
+          fallbackwshardingstruct->m_fallbackblock.GetHeader().GetShardId();
+      const PubKey& leaderPubKey =
+          fallbackwshardingstruct->m_fallbackblock.GetHeader()
+              .GetLeaderPubKey();
+      const Peer& leaderNetworkInfo =
+          fallbackwshardingstruct->m_fallbackblock.GetHeader()
+              .GetLeaderNetworkInfo();
+      const DequeOfShard& shards = fallbackwshardingstruct->m_shards;
+      m_mediator.m_node->UpdateDSCommitteeAfterFallback(
+          shard_id, leaderPubKey, leaderNetworkInfo, dsComm, shards);
+    }
+
+    m_mediator.m_blocklinkchain.SetBuiltDSComm(dsComm);
+
+    m_mediator.m_blocklinkchain.AddBlockLink(
+        std::get<BlockLinkIndex::INDEX>(blocklink),
+        std::get<BlockLinkIndex::DSINDEX>(blocklink),
+        std::get<BlockLinkIndex::BLOCKTYPE>(blocklink),
+        std::get<BlockLinkIndex::BLOCKHASH>(blocklink));
+  }
+
+  if (!toDelete) {
+    return true;
+  }
+
+  for (; blocklinkItr != blocklinks.end(); ++blocklinkItr) {
+    const auto& blocklink = *blocklinkItr;
+    if (std::get<BlockLinkIndex::BLOCKTYPE>(blocklink) == BlockType::DS) {
+      if (!BlockStorage::GetBlockStorage().DeleteDSBlock(
+              std::get<BlockLinkIndex::DSINDEX>(blocklink))) {
+        LOG_GENERAL(WARNING, "BlockStorage::DeleteDSBlock failed");
+      } else {
+        if (!BlockStorage::GetBlockStorage().PutMetadata(
+                MetaType::DSINCOMPLETED, {'0'})) {
+          LOG_GENERAL(WARNING,
+                      "BlockStorage::PutMetadata (DSINCOMPLETED) '0' failed");
+          return false;
+        }
+      }
+    } else if (std::get<BlockLinkIndex::BLOCKTYPE>(blocklink) ==
+               BlockType::VC) {
+      if (!BlockStorage::GetBlockStorage().DeleteVCBlock(
+              std::get<BlockLinkIndex::BLOCKHASH>(blocklink))) {
+        LOG_GENERAL(WARNING, "Could not delete VC block");
+      }
+    } else if (std::get<BlockLinkIndex::BLOCKTYPE>(blocklink) ==
+               BlockType::FB) {
+      if (!BlockStorage::GetBlockStorage().DeleteFallbackBlock(
+              std::get<BlockLinkIndex::BLOCKHASH>(blocklink))) {
+        LOG_GENERAL(WARNING, "Could not deleteLoop  FB block");
+      }
+    }
+  }
+
+  return true;
+}
+
+bool Retriever::CleanExtraTxBodies() {
+  if (!LOOKUP_NODE_MODE) {
+    LOG_GENERAL(WARNING,
+                "Retriever::CleanExtraTxBodies not expected to be called "
+                "from other than LookUp node.");
+    return true;
+  }
+
+  LOG_MARKER();
+  std::list<TxnHash> txnHashes;
+  if (BlockStorage::GetBlockStorage().GetAllTxBodiesTmp(txnHashes)) {
+    for (auto i : txnHashes) {
+      if (!BlockStorage::GetBlockStorage().DeleteTxBody(i)) {
+        LOG_GENERAL(WARNING, "FAIL: To delete TxHash in TxBodiesTmpDB");
+        // return false;
+      }
+    }
+  }
+  return BlockStorage::GetBlockStorage().ResetDB(BlockStorage::TX_BODY_TMP);
+}
+
+bool Retriever::RetrieveStates() {
+  LOG_MARKER();
+  return AccountStore::GetInstance().RetrieveFromDisk();
+}
+
+bool Retriever::ValidateStates() {
+  LOG_MARKER();
+
+  if (CONTRACT_STATES_MIGRATED) {
+    LOG_GENERAL(INFO,
+                "Data migration just applied, skip for this time, remember to "
+                "disable if it's done");
+    return true;
+  }
+
+  if (m_mediator.m_txBlockChain.GetLastBlock().GetHeader().GetStateRootHash() ==
+      AccountStore::GetInstance().GetStateRootHash()) {
+    LOG_GENERAL(INFO, "ValidateStates passed.");
+    return true;
+  } else {
+    LOG_GENERAL(WARNING, "ValidateStates failed.");
+    LOG_GENERAL(INFO, "StateRoot in FinalBlock(BlockNum: "
+                          << m_mediator.m_txBlockChain.GetLastBlock()
+                                 .GetHeader()
+                                 .GetBlockNum()
+                          << "): "
+                          << m_mediator.m_txBlockChain.GetLastBlock()
+                                 .GetHeader()
+                                 .GetStateRootHash()
+                          << '\n'
+                          << "Retrieved StateRoot: "
+                          << AccountStore::GetInstance().GetStateRootHash());
+    return false;
+  }
+}
+
+void Retriever::CleanAll() {
+  if (BlockStorage::GetBlockStorage().ResetAll()) {
+    LOG_GENERAL(INFO, "Reset DB Succeed");
+  } else {
+    LOG_GENERAL(WARNING, "FAIL: Reset DB Failed");
+  }
 }

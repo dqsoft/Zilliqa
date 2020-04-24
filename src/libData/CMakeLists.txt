@@ -1,3 +1,5 @@
 add_subdirectory (AccountData)
 add_subdirectory (BlockData)
+add_subdirectory (MiningData)
 add_subdirectory (BlockChainData)
+add_subdirectory (CoinbaseData)
